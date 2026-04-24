@@ -19,6 +19,7 @@ Macroscope should become a trustworthy developer-environment archaeologist: it a
 4. **Prefer reversible operations**
    - Move files/apps to Trash instead of permanent deletion where possible.
    - Dry-run should always be available before apply.
+   - Real apply requires explicit `--yes`.
 
 5. **Migration beats deletion when possible**
    - For stale Intel tools, suggest native ARM replacements first.
@@ -92,18 +93,20 @@ Should answer:
 
 ### `macroscope apply`
 
-Current: dry-run generated plans or JSON plan files.
+Current: dry-run generated plans or JSON plan files, and execute move-to-Trash actions only with explicit confirmation.
 
 ```bash
 macroscope apply --dry-run
 macroscope apply plan.json --dry-run
+macroscope apply --yes plan.json
 ```
+
+Package-manager and manual actions are printed for review rather than executed automatically.
 
 Future:
 
 ```bash
 macroscope apply --interactive plan.json
-macroscope apply plan.json
 ```
 
 Execution modes:
@@ -198,4 +201,4 @@ enum ActionKind {
 - [x] Show plan summary in TUI
 - [x] Add `explain` command
 - [x] Add dry-run executor
-- [ ] Add safe Trash implementation
+- [x] Add safe Trash implementation

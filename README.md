@@ -14,10 +14,11 @@ cargo run -- plan
 cargo run -- plan --markdown cleanup-plan.md
 cargo run -- explain /usr/local/bin/aws
 cargo run -- apply --dry-run
+cargo run -- apply --yes plan.json
 cargo run -- tui
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `tui` opens an interactive terminal dashboard with a selectable findings list, detail pane, and related actions. Press `↑/↓` or `j/k` to move, and `q` or `Esc` to exit.
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. `tui` opens an interactive terminal dashboard with a selectable findings list, detail pane, and related actions. Press `↑/↓` or `j/k` to move, and `q` or `Esc` to exit.
 
 The initial scanner audits:
 

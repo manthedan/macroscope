@@ -22,6 +22,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -65,14 +66,18 @@ enum Commands {
         target: String,
     },
 
-    /// Dry-run an action plan without modifying the system.
+    /// Apply or dry-run an action plan.
     Apply {
         /// Read an action plan JSON file. If omitted, generate a fresh plan.
         plan: Option<PathBuf>,
 
-        /// Required for now: print what would happen without changing anything.
+        /// Print what would happen without changing anything.
         #[arg(long)]
         dry_run: bool,
+
+        /// Required for real mutations. Without this, apply refuses to change the system.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Open an interactive terminal dashboard.
@@ -286,12 +291,13 @@ fn main() -> Result<()> {
             let plan = generate_action_plan(&report);
             print_explanation(&target, &report, &plan);
         }
-        Commands::Apply { plan, dry_run } => {
-            if !dry_run {
-                anyhow::bail!("only `macroscope apply --dry-run` is implemented so far");
-            }
+        Commands::Apply { plan, dry_run, yes } => {
             let plan = load_or_generate_plan(plan.as_deref())?;
-            dry_run_action_plan(&plan);
+            if dry_run {
+                dry_run_action_plan(&plan);
+            } else {
+                apply_action_plan(&plan, yes)?;
+            }
         }
         Commands::Tui => {
             let report = scan();
@@ -1450,25 +1456,162 @@ fn dry_run_action_plan(plan: &ActionPlan) {
     }
 
     for action in &plan.actions {
-        println!("{} {}", "Would run:".bold(), action.title.bold());
-        println!("  ID: {}", action.id);
-        println!(
-            "  Risk: {:?} | Confidence: {:?} | Destructive: {}",
-            action.risk, action.confidence, action.destructive
+        print_apply_preview(action, true);
+    }
+}
+
+fn apply_action_plan(plan: &ActionPlan, yes: bool) -> Result<()> {
+    if !yes {
+        anyhow::bail!(
+            "refusing to mutate without --yes; run `macroscope apply --dry-run` first, then `macroscope apply --yes [plan.json]`"
         );
+    }
+
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Apply".bright_cyan().bold()
+    );
+    println!(
+        "{}",
+        "Mutating mode: only move-to-trash actions are executed; package installs and manual actions are printed."
+            .yellow()
+            .bold()
+    );
+    println!();
+
+    if plan.actions.is_empty() {
+        println!("{}", "No actions to apply.".green());
+        return Ok(());
+    }
+
+    for action in &plan.actions {
         match &action.kind {
             ActionKind::MoveToTrash { path } => {
-                println!("  Would move to Trash: {}", path.display());
+                println!("{} {}", "Applying:".bold(), action.title.bold());
+                println!("  ID: {}", action.id);
+                move_to_trash(path)?;
+                println!("  {} {}", "Moved to Trash:".green().bold(), path.display());
+                println!();
             }
-            ActionKind::BrewInstall { package } => {
-                println!("  Would execute: brew install {package}");
-            }
-            ActionKind::Manual { instructions } => {
-                println!("  Manual instruction: {instructions}");
+            ActionKind::BrewInstall { .. } | ActionKind::Manual { .. } => {
+                print_apply_preview(action, false);
             }
         }
-        println!();
     }
+
+    Ok(())
+}
+
+fn print_apply_preview(action: &PlannedAction, dry_run: bool) {
+    let prefix = if dry_run { "Would run:" } else { "Skipped:" };
+    println!("{} {}", prefix.bold(), action.title.bold());
+    println!("  ID: {}", action.id);
+    println!(
+        "  Risk: {:?} | Confidence: {:?} | Destructive: {}",
+        action.risk, action.confidence, action.destructive
+    );
+    match &action.kind {
+        ActionKind::MoveToTrash { path } => {
+            if dry_run {
+                println!("  Would move to Trash: {}", path.display());
+            } else {
+                println!("  Not moved in this pass: {}", path.display());
+            }
+        }
+        ActionKind::BrewInstall { package } => {
+            if dry_run {
+                println!("  Would execute: brew install {package}");
+            } else {
+                println!("  Manual/package-manager action not executed: brew install {package}");
+            }
+        }
+        ActionKind::Manual { instructions } => {
+            println!("  Manual instruction: {instructions}");
+        }
+    }
+    println!();
+}
+
+fn move_to_trash(path: &Path) -> Result<()> {
+    fs::symlink_metadata(path)
+        .with_context(|| format!("cannot move missing path to Trash: {}", path.display()))?;
+
+    match move_to_trash_with_finder(path) {
+        Ok(()) => Ok(()),
+        Err(finder_error) => move_to_user_trash(path).with_context(|| {
+            format!(
+                "Finder trash failed ({finder_error}); fallback ~/.Trash move also failed for {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+fn move_to_trash_with_finder(path: &Path) -> Result<()> {
+    let script = format!(
+        "tell application \"Finder\" to delete POSIX file \"{}\"",
+        escape_applescript_string(&path.display().to_string())
+    );
+    let output = Command::new("osascript").arg("-e").arg(script).output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "osascript failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn move_to_user_trash(path: &Path) -> Result<()> {
+    let home = dirs::home_dir().context("cannot locate home directory for ~/.Trash fallback")?;
+    let trash = home.join(".Trash");
+    fs::create_dir_all(&trash).with_context(|| format!("failed to create {}", trash.display()))?;
+
+    let file_name = path
+        .file_name()
+        .context("cannot move path without a file name to Trash")?;
+    let mut destination = trash.join(file_name);
+    if destination.exists() || fs::symlink_metadata(&destination).is_ok() {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "item".into());
+        let extension = path.extension().map(|s| s.to_string_lossy().into_owned());
+        for idx in 1..1000 {
+            let candidate_name = if let Some(extension) = &extension {
+                format!("{stem} {idx}.{extension}")
+            } else {
+                format!("{stem} {idx}")
+            };
+            let candidate = trash.join(candidate_name);
+            if !candidate.exists() && fs::symlink_metadata(&candidate).is_err() {
+                destination = candidate;
+                break;
+            }
+        }
+    }
+
+    fs::rename(path, &destination).or_else(|err| {
+        if err.kind() == ErrorKind::CrossesDevices {
+            if path.is_dir() {
+                anyhow::bail!(
+                    "cannot fallback-trash directory across filesystems: {}",
+                    path.display()
+                );
+            }
+            fs::copy(path, &destination)?;
+            fs::remove_file(path)?;
+            Ok(())
+        } else {
+            Err(err.into())
+        }
+    })?;
+    Ok(())
+}
+
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn run_tui(report: &Report, plan: &ActionPlan) -> Result<()> {
