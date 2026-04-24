@@ -19,7 +19,7 @@ cargo run -- tui
 cargo run -- tui --apply
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. `tui` opens an interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
 
 TUI controls:
 

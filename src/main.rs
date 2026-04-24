@@ -2261,8 +2261,19 @@ fn print_apply_preview(action: &PlannedAction, dry_run: bool) {
 }
 
 fn move_to_trash(path: &Path) -> Result<()> {
-    fs::symlink_metadata(path)
+    let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("cannot move missing path to Trash: {}", path.display()))?;
+
+    if !metadata.is_dir() {
+        return move_to_user_trash(path).or_else(|trash_error| {
+            move_to_trash_with_finder(path).with_context(|| {
+                format!(
+                    "direct ~/.Trash move failed ({trash_error}); Finder trash also failed for {}",
+                    path.display()
+                )
+            })
+        });
+    }
 
     match move_to_trash_with_finder(path) {
         Ok(()) => Ok(()),
