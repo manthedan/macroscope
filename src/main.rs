@@ -197,6 +197,12 @@ enum Severity {
     Risk,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiTab {
+    Findings,
+    Plan,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ActionPlan {
     summary: ActionPlanSummary,
@@ -1635,7 +1641,13 @@ fn tui_loop<B: Backend>(
     report: &Report,
     plan: &ActionPlan,
 ) -> Result<()> {
-    let mut selected = if report.findings.is_empty() {
+    let mut active_tab = TuiTab::Findings;
+    let mut selected_finding = if report.findings.is_empty() {
+        None
+    } else {
+        Some(0)
+    };
+    let mut selected_action = if plan.actions.is_empty() {
         None
     } else {
         Some(0)
@@ -1666,6 +1678,10 @@ fn tui_loop<B: Backend>(
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw("  "),
+                tab_span("Findings", active_tab == TuiTab::Findings),
+                Span::raw("  "),
+                tab_span("Plan", active_tab == TuiTab::Plan),
                 Span::raw("  "),
                 Span::styled(
                     "local-first macOS developer environment audit",
@@ -1736,106 +1752,41 @@ fn tui_loop<B: Backend>(
             .wrap(Wrap { trim: true });
             frame.render_widget(tools, overview_chunks[1]);
 
-            let findings_chunks = Layout::default()
+            let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(root[2]);
 
-            let items: Vec<ListItem> = if report.findings.is_empty() {
-                vec![ListItem::new(Line::from(vec![Span::styled(
-                    "No notable findings. Nice.",
-                    Style::default().fg(Color::Green),
-                )]))]
-            } else {
-                report
-                    .findings
-                    .iter()
-                    .map(|finding| {
-                        ListItem::new(Line::from(vec![
-                            Span::styled(
-                                format!("{:<4} ", severity_label(&finding.severity)),
-                                tui_severity_style(&finding.severity),
-                            ),
-                            Span::raw(finding.title.clone()),
-                        ]))
-                    })
-                    .collect()
-            };
-
-            let mut state = ListState::default();
-            state.select(selected);
-            let findings = List::new(items)
-                .block(
-                    Block::default()
-                        .title(format!(
-                            "Findings  {risks} risk · {warns} warn · {infos} info"
-                        ))
-                        .borders(Borders::ALL),
-                )
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("➜ ");
-            frame.render_stateful_widget(findings, findings_chunks[0], &mut state);
-
-            let detail_lines =
-                if let Some(idx) = selected.and_then(|idx| report.findings.get(idx).map(|_| idx)) {
-                    let finding = &report.findings[idx];
-                    let mut lines = vec![
-                        Line::from(vec![
-                            Span::styled(
-                                severity_label(&finding.severity),
-                                tui_severity_style(&finding.severity),
-                            ),
-                            Span::raw("  "),
-                            Span::styled(
-                                finding.title.clone(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
-                        Line::from(""),
-                        Line::from(finding.detail.clone()),
-                        Line::from(""),
-                    ];
-
-                    let related = related_actions_for_finding(finding, plan);
-                    if !related.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "Related actions:",
-                            Style::default().add_modifier(Modifier::BOLD),
-                        )));
-                        for action in related.into_iter().take(3) {
-                            lines.push(Line::from(format!("- {}", action.title)));
-                        }
-                        lines.push(Line::from(""));
-                    }
-
-                    lines.push(Line::from(Span::styled(
-                        format!("Finding {} of {}", idx + 1, report.findings.len()),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    lines
-                } else {
-                    vec![Line::from("No finding selected.")]
-                };
-
-            let detail = Paragraph::new(detail_lines)
-                .block(Block::default().title("Detail").borders(Borders::ALL))
-                .wrap(Wrap { trim: true });
-            frame.render_widget(detail, findings_chunks[1]);
+            match active_tab {
+                TuiTab::Findings => render_findings_tab(
+                    frame,
+                    body_chunks[0],
+                    body_chunks[1],
+                    report,
+                    plan,
+                    selected_finding,
+                    risks,
+                    warns,
+                    infos,
+                ),
+                TuiTab::Plan => {
+                    render_plan_tab(frame, body_chunks[0], body_chunks[1], plan, selected_action)
+                }
+            }
 
             let footer = Paragraph::new(Line::from(vec![
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" switch  ·  "),
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" select  ·  "),
                 Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" move  ·  "),
+                Span::styled("f/p", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" findings/plan  ·  "),
                 Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw("/"),
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" quit  ·  "),
-                Span::raw("scan --markdown report.md writes a reviewable report"),
+                Span::raw(" quit"),
             ]))
             .block(Block::default().borders(Borders::ALL));
             frame.render_widget(footer, root[3]);
@@ -1845,12 +1796,26 @@ fn tui_loop<B: Backend>(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        selected = next_finding(selected, report.findings.len())
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        selected = previous_finding(selected, report.findings.len())
-                    }
+                    KeyCode::Tab => active_tab = toggle_tab(active_tab),
+                    KeyCode::Char('f') => active_tab = TuiTab::Findings,
+                    KeyCode::Char('p') => active_tab = TuiTab::Plan,
+                    KeyCode::Down | KeyCode::Char('j') => match active_tab {
+                        TuiTab::Findings => {
+                            selected_finding = next_finding(selected_finding, report.findings.len())
+                        }
+                        TuiTab::Plan => {
+                            selected_action = next_finding(selected_action, plan.actions.len())
+                        }
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match active_tab {
+                        TuiTab::Findings => {
+                            selected_finding =
+                                previous_finding(selected_finding, report.findings.len())
+                        }
+                        TuiTab::Plan => {
+                            selected_action = previous_finding(selected_action, plan.actions.len())
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -1858,6 +1823,247 @@ fn tui_loop<B: Backend>(
     }
 
     Ok(())
+}
+
+fn render_findings_tab(
+    frame: &mut ratatui::Frame<'_>,
+    list_area: ratatui::layout::Rect,
+    detail_area: ratatui::layout::Rect,
+    report: &Report,
+    plan: &ActionPlan,
+    selected: Option<usize>,
+    risks: usize,
+    warns: usize,
+    infos: usize,
+) {
+    let items: Vec<ListItem> = if report.findings.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "No notable findings. Nice.",
+            Style::default().fg(Color::Green),
+        )]))]
+    } else {
+        report
+            .findings
+            .iter()
+            .map(|finding| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{:<4} ", severity_label(&finding.severity)),
+                        tui_severity_style(&finding.severity),
+                    ),
+                    Span::raw(finding.title.clone()),
+                ]))
+            })
+            .collect()
+    };
+
+    let mut state = ListState::default();
+    state.select(selected);
+    let findings = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(
+                    "Findings  {risks} risk · {warns} warn · {infos} info"
+                ))
+                .borders(Borders::ALL),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("➜ ");
+    frame.render_stateful_widget(findings, list_area, &mut state);
+
+    let detail_lines =
+        if let Some(idx) = selected.and_then(|idx| report.findings.get(idx).map(|_| idx)) {
+            let finding = &report.findings[idx];
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        severity_label(&finding.severity),
+                        tui_severity_style(&finding.severity),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        finding.title.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(finding.detail.clone()),
+                Line::from(""),
+            ];
+
+            let related = related_actions_for_finding(finding, plan);
+            if !related.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "Related actions:",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for action in related.into_iter().take(3) {
+                    lines.push(Line::from(format!("- {}", action.title)));
+                }
+                lines.push(Line::from(""));
+            }
+
+            lines.push(Line::from(Span::styled(
+                format!("Finding {} of {}", idx + 1, report.findings.len()),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines
+        } else {
+            vec![Line::from("No finding selected.")]
+        };
+
+    let detail = Paragraph::new(detail_lines)
+        .block(
+            Block::default()
+                .title("Finding detail")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, detail_area);
+}
+
+fn render_plan_tab(
+    frame: &mut ratatui::Frame<'_>,
+    list_area: ratatui::layout::Rect,
+    detail_area: ratatui::layout::Rect,
+    plan: &ActionPlan,
+    selected: Option<usize>,
+) {
+    let items: Vec<ListItem> = if plan.actions.is_empty() {
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "No actions proposed. Nice.",
+            Style::default().fg(Color::Green),
+        )]))]
+    } else {
+        plan.actions
+            .iter()
+            .map(|action| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{:<4} ", risk_label(action.risk)),
+                        tui_risk_style(action.risk),
+                    ),
+                    Span::raw(action.title.clone()),
+                ]))
+            })
+            .collect()
+    };
+
+    let mut state = ListState::default();
+    state.select(selected);
+    let actions = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(
+                    "Plan  {} actions · {} destructive",
+                    plan.summary.total, plan.summary.destructive
+                ))
+                .borders(Borders::ALL),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("➜ ");
+    frame.render_stateful_widget(actions, list_area, &mut state);
+
+    let detail_lines =
+        if let Some(idx) = selected.and_then(|idx| plan.actions.get(idx).map(|_| idx)) {
+            let action = &plan.actions[idx];
+            vec![
+                Line::from(vec![
+                    Span::styled(risk_label(action.risk), tui_risk_style(action.risk)),
+                    Span::raw("  "),
+                    Span::styled(
+                        confidence_label(action.confidence),
+                        Style::default().fg(Color::Blue),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    action.title.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(format!("ID: {}", action.id)),
+                Line::from(format!("Kind: {}", action_kind_label(&action.kind))),
+                Line::from(format!("Destructive: {}", action.destructive)),
+                Line::from(""),
+                Line::from(action.rationale.clone()),
+                Line::from(""),
+                Line::from(format!("Action: {}", action_instruction(action))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("Action {} of {}", idx + 1, plan.actions.len()),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]
+        } else {
+            vec![Line::from("No action selected.")]
+        };
+
+    let detail = Paragraph::new(detail_lines)
+        .block(
+            Block::default()
+                .title("Action detail")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, detail_area);
+}
+
+fn tab_span(label: &'static str, active: bool) -> Span<'static> {
+    if active {
+        Span::styled(
+            format!("[{label}]"),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(format!(" {label} "), Style::default().fg(Color::DarkGray))
+    }
+}
+
+fn toggle_tab(tab: TuiTab) -> TuiTab {
+    match tab {
+        TuiTab::Findings => TuiTab::Plan,
+        TuiTab::Plan => TuiTab::Findings,
+    }
+}
+
+fn risk_label(risk: ActionRisk) -> &'static str {
+    match risk {
+        ActionRisk::Low => "LOW",
+        ActionRisk::Medium => "MED",
+        ActionRisk::High => "HIGH",
+    }
+}
+
+fn confidence_label(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Low => "low-confidence",
+        Confidence::Medium => "medium-confidence",
+        Confidence::High => "high-confidence",
+    }
+}
+
+fn tui_risk_style(risk: ActionRisk) -> Style {
+    match risk {
+        ActionRisk::Low => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        ActionRisk::Medium => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        ActionRisk::High => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
 }
 
 fn next_finding(selected: Option<usize>, len: usize) -> Option<usize> {

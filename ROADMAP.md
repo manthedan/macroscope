@@ -41,11 +41,11 @@ Planned:
 
 ### `macroscope tui`
 
-Current: interactive dashboard with selectable findings, plan summary, and related actions in the detail pane.
+Current: interactive dashboard with selectable Findings and Plan tabs, plan summary, related actions, and action detail browsing.
 
 Planned:
 
-- Tabs: Overview, Findings, Apps, Binaries, Packages, Plan
+- More tabs: Apps, Binaries, Packages
 - Search/filter by severity/category/path
 - Per-finding explanation pane
 - Suggested actions pane
