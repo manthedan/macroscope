@@ -59,6 +59,24 @@ The initial scanner audits:
 - TUI Plan tab with action detail browsing
 - TUI dry-run, export, explain, rescan, and guarded apply controls
 
+## Project layout
+
+Macroscope is split into focused Rust modules:
+
+```text
+src/main.rs      CLI argument parsing and command dispatch
+src/lib.rs       library module wiring and focused unit tests
+src/model.rs     shared report/action data structures
+src/scan.rs      scan orchestration and source-specific scanners
+src/findings.rs  finding generation and reusable finding helpers
+src/plan.rs      ActionPlan generation, rendering, and relation matching
+src/apply.rs     dry-run/apply execution and Trash-backed moves
+src/tui.rs       ratatui dashboard, progress UI, and guarded TUI apply flow
+src/markdown.rs  Markdown report rendering
+src/output.rs    pretty terminal output and explanations
+src/util.rs      command/path/formatting helpers
+```
+
 ## Why npm belongs here
 
 Yes: if this is dev-focused, npm/global Node tooling should absolutely be part of the audit.
