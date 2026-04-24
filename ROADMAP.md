@@ -29,7 +29,7 @@ Macroscope should become a trustworthy developer-environment archaeologist: it a
 
 ### `macroscope scan`
 
-Current: pretty read-only audit.
+Current: pretty read-only audit with terminal scan progress animation.
 
 Planned:
 
@@ -46,7 +46,7 @@ Planned:
 
 ### `macroscope tui`
 
-Current: interactive dashboard with selectable Findings and Plan tabs, plan summary, related actions, action detail browsing, explain modals, dry-run previews, plan export, rescan, and guarded apply controls. Plain `macroscope tui` is read-only; `macroscope tui --apply` enables Move-to-Trash execution only after a dry-run and typed confirmation.
+Current: interactive dashboard with scan/rescan progress animation, selectable Findings and Plan tabs, plan summary, related actions, action detail browsing, explain modals, dry-run previews, plan export, rescan, and guarded apply controls. Plain `macroscope tui` is read-only; `macroscope tui --apply` enables Move-to-Trash execution only after a dry-run and typed confirmation.
 
 Planned:
 
@@ -215,5 +215,6 @@ enum ActionKind {
 - [x] Add dry-run executor
 - [x] Add safe Trash implementation
 - [x] Add Homebrew cleanup intelligence
+- [x] Add CLI and TUI scan progress animations
 - [x] Add TUI explain/dry-run/export/rescan controls
 - [x] Add guarded TUI apply mode for Move-to-Trash actions

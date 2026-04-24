@@ -50,8 +50,8 @@ The initial scanner audits:
 - Python/uv versions
 - Conda install, platform, envs, env dirs, and package caches
 - Go toolchain, GOPATH/GOBIN/GOROOT, and GOPATH/bin binary architectures
-- Pretty terminal output
-- Interactive TUI dashboard
+- Pretty terminal output with scan progress animation
+- Interactive TUI dashboard with scan/rescan progress animation
 - Read-only ActionPlan generation
 - `explain` for paths/action IDs/bundle IDs/finding text
 - Dry-run ActionPlan executor

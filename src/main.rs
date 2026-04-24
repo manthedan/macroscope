@@ -22,9 +22,15 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::thread;
 use std::time::Duration;
 use walkdir::WalkDir;
 
@@ -309,7 +315,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Scan { markdown, json } => {
-            let report = scan();
+            let report = if json {
+                scan()
+            } else {
+                scan_with_cli_progress("Scanning this Mac")
+            };
 
             if let Some(path) = markdown {
                 let rendered = render_markdown(&report);
@@ -326,7 +336,11 @@ fn main() -> Result<()> {
             }
         }
         Commands::Plan { markdown, json } => {
-            let report = scan();
+            let report = if json {
+                scan()
+            } else {
+                scan_with_cli_progress("Scanning for action plan")
+            };
             let plan = generate_action_plan(&report);
 
             if let Some(path) = markdown {
@@ -344,7 +358,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Explain { target } => {
-            let report = scan();
+            let report = scan_with_cli_progress("Scanning before explanation");
             let plan = generate_action_plan(&report);
             print_explanation(&target, &report, &plan);
         }
@@ -357,9 +371,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Tui { apply } => {
-            let report = scan();
-            let plan = generate_action_plan(&report);
-            run_tui(report, plan, apply)?;
+            run_tui(apply)?;
         }
     }
 
@@ -367,13 +379,38 @@ fn main() -> Result<()> {
 }
 
 fn scan() -> Report {
+    scan_with_observer(|_, _, _| {})
+}
+
+fn scan_with_cli_progress(title: &'static str) -> Report {
+    let progress = CliProgress::start(title);
+    let report = scan_with_observer(|phase, index, total| {
+        progress.set(format!("[{index}/{total}] {phase}"));
+    });
+    progress.finish("Scan complete");
+    report
+}
+
+fn scan_with_observer<F>(mut progress: F) -> Report
+where
+    F: FnMut(&'static str, usize, usize),
+{
+    const TOTAL: usize = 7;
+
+    progress("System", 1, TOTAL);
     let system = scan_system();
+    progress("Homebrew", 2, TOTAL);
     let homebrew = scan_homebrew();
+    progress("Applications", 3, TOTAL);
     let apps = scan_apps();
+    progress("/usr/local/bin", 4, TOTAL);
     let local_bins = scan_local_bins(Path::new("/usr/local/bin"));
+    progress("PATH", 5, TOTAL);
     let path = scan_path();
+    progress("Developer tools", 6, TOTAL);
     let dev_tools = scan_dev_tools();
 
+    progress("Findings", 7, TOTAL);
     let findings = build_findings(&system, &homebrew, &apps, &local_bins, &path, &dev_tools);
 
     Report {
@@ -384,6 +421,55 @@ fn scan() -> Report {
         path,
         dev_tools,
         findings,
+    }
+}
+
+struct CliProgress {
+    done: Arc<AtomicBool>,
+    message: Arc<Mutex<String>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl CliProgress {
+    fn start(title: &'static str) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let message = Arc::new(Mutex::new(title.to_string()));
+        let thread_done = Arc::clone(&done);
+        let thread_message = Arc::clone(&message);
+        let handle = thread::spawn(move || {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut idx = 0;
+            while !thread_done.load(Ordering::Relaxed) {
+                let current = thread_message
+                    .lock()
+                    .map(|message| message.clone())
+                    .unwrap_or_else(|_| title.to_string());
+                eprint!("\r\x1b[2K{} {}", frames[idx % frames.len()], current);
+                let _ = io::stderr().flush();
+                idx += 1;
+                thread::sleep(Duration::from_millis(90));
+            }
+        });
+
+        Self {
+            done,
+            message,
+            handle: Some(handle),
+        }
+    }
+
+    fn set(&self, message: String) {
+        if let Ok(mut current) = self.message.lock() {
+            *current = message;
+        }
+    }
+
+    fn finish(mut self, message: &'static str) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        eprintln!("\r\x1b[2K✓ {message}");
     }
 }
 
@@ -2374,20 +2460,122 @@ enum ConfirmTarget {
     WholeExecutablePlan,
 }
 
-fn run_tui(report: Report, plan: ActionPlan, apply_enabled: bool) -> Result<()> {
+enum ScanEvent {
+    Step {
+        phase: &'static str,
+        index: usize,
+        total: usize,
+    },
+    Done(Report),
+}
+
+fn run_tui(apply_enabled: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = tui_loop(&mut terminal, report, plan, apply_enabled);
+    let result = (|| {
+        let report = scan_with_tui_progress(&mut terminal)?;
+        let plan = generate_action_plan(&report);
+        tui_loop(&mut terminal, report, plan, apply_enabled)
+    })();
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
+}
+
+fn scan_with_tui_progress<B: Backend>(terminal: &mut Terminal<B>) -> Result<Report> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let report = scan_with_observer(|phase, index, total| {
+            let _ = tx.send(ScanEvent::Step {
+                phase,
+                index,
+                total,
+            });
+        });
+        let _ = tx.send(ScanEvent::Done(report));
+    });
+
+    let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let mut frame_idx = 0;
+    let mut phase = "Starting";
+    let mut index = 0;
+    let mut total = 7;
+
+    loop {
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ScanEvent::Step {
+                    phase: next_phase,
+                    index: next_index,
+                    total: next_total,
+                } => {
+                    phase = next_phase;
+                    index = next_index;
+                    total = next_total;
+                }
+                ScanEvent::Done(report) => return Ok(report),
+            }
+        }
+
+        terminal.draw(|frame| {
+            let area = centered_rect(62, 38, frame.area());
+            frame.render_widget(Clear, area);
+            let gauge_width = 28usize;
+            let filled = if total == 0 {
+                0
+            } else {
+                gauge_width * index / total
+            };
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled),
+                "░".repeat(gauge_width.saturating_sub(filled))
+            );
+            let paragraph = Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        frames[frame_idx % frames.len()],
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        "Scanning your Mac",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(format!("[{index}/{total}] {phase}")),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(bar, Style::default().fg(Color::Cyan)),
+                    Span::raw(" "),
+                    Span::styled("read-only", Style::default().fg(Color::Green)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Homebrew, app, and tool scans can take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(Block::default().title("Macroscope").borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, area);
+        })?;
+
+        frame_idx += 1;
+        thread::sleep(Duration::from_millis(90));
+    }
 }
 
 fn tui_loop<B: Backend>(
@@ -2767,7 +2955,7 @@ fn tui_loop<B: Backend>(
                         Err(err) => status = format!("Failed to export Markdown plan: {err}"),
                     },
                     KeyCode::Char('r') => {
-                        report = scan();
+                        report = scan_with_tui_progress(terminal)?;
                         plan = generate_action_plan(&report);
                         selected_finding = if report.findings.is_empty() {
                             None
