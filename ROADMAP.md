@@ -100,11 +100,12 @@ Planned:
 
 ### `macroscope guide`
 
-Planned: guided terminal workflow that walks a user through the whole cleanup session.
+Current: guided terminal workflow that walks a user through scan, plan, report/brief export, dry-run, optional guarded apply, and optional verification.
 
 ```bash
 macroscope guide
 macroscope guide --apply
+macroscope guide --no-prompt
 ```
 
 The guide should be the primary interactive experience:
@@ -172,7 +173,7 @@ Should answer:
 
 ### `macroscope brief`
 
-Planned: generate a concise handoff document designed for humans, Codex, Claude Code, or similar AI coding agents.
+Current: generate a concise handoff document designed for humans, Codex, Claude Code, or similar AI coding agents.
 
 ```bash
 macroscope brief
@@ -301,15 +302,15 @@ enum ActionKind {
 
 ## Next priorities
 
-1. **Add an AI/human handoff brief**
-   - Add `macroscope brief` as a first-class command.
-   - Produce a compact Markdown document suitable for Codex, Claude Code, or a human reviewer.
-   - Separate high-confidence evidence from ambiguous ecosystem-specific findings.
-   - Include “do not automate” warnings and questions to ask before cleanup.
+1. **Improve the AI/human handoff brief**
+   - Keep `macroscope brief` compact enough to paste into Codex/Claude Code.
+   - Better separate high-confidence evidence from ambiguous ecosystem-specific findings.
+   - Add richer raw evidence only where it helps decision-making.
+   - Keep “do not automate” warnings and questions explicit.
 
-2. **Add a guided cleanup workflow**
-   - Add `macroscope guide` as the primary interactive flow.
-   - Walk through scan → plan → review → safe apply/manual/handoff → optional verification.
+2. **Improve the guided cleanup workflow**
+   - Make `macroscope guide` better at assigning findings/actions to apply/manual/handoff/ignore/needs-more-evidence buckets.
+   - Add clearer prompts and summaries before any mutation.
    - Keep mutation behind `--apply`, dry-run, and explicit typed confirmation.
    - Treat the existing dashboard TUI as optional browsing UI, not the core workflow.
 
@@ -349,3 +350,5 @@ enum ActionKind {
 - [x] Add CLI and TUI scan progress animations
 - [x] Add TUI explain/dry-run/export/rescan controls
 - [x] Add guarded TUI apply mode for Move-to-Trash actions
+- [x] Add `brief` handoff command
+- [x] Add `guide` workflow command

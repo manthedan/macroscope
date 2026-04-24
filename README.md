@@ -12,6 +12,9 @@ cargo run -- scan --markdown macroscope-report.md
 cargo run -- scan --json
 cargo run -- plan
 cargo run -- plan --markdown cleanup-plan.md
+cargo run -- brief --markdown macroscope-brief.md --for-llm
+cargo run -- guide
+cargo run -- guide --apply
 cargo run -- explain /usr/local/bin/aws
 cargo run -- apply --dry-run
 cargo run -- apply --yes plan.json
@@ -19,7 +22,7 @@ cargo run -- tui
 cargo run -- tui --apply
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `brief` writes a human/AI handoff document that separates high-confidence evidence from ambiguous review items. `guide` walks through scan → plan → decision → safe apply/manual/handoff → optional verification. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an optional interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
 
 TUI controls:
 
@@ -70,8 +73,10 @@ src/model.rs     shared report/action data structures
 src/scan.rs      scan orchestration and source-specific scanners
 src/findings.rs  finding generation and reusable finding helpers
 src/plan.rs      ActionPlan generation, rendering, and relation matching
+src/brief.rs     human/AI handoff brief rendering
+src/guide.rs     guided scan/plan/handoff/apply workflow
 src/apply.rs     dry-run/apply execution and Trash-backed moves
-src/tui.rs       ratatui dashboard, progress UI, and guarded TUI apply flow
+src/tui.rs       optional ratatui dashboard, progress UI, and guarded TUI apply flow
 src/markdown.rs  Markdown report rendering
 src/output.rs    pretty terminal output and explanations
 src/util.rs      command/path/formatting helpers
@@ -115,12 +120,12 @@ Eventually Macroscope should also audit:
 
 Near-term priorities are tracked in detail in [`ROADMAP.md`](ROADMAP.md). The next likely work is:
 
-1. Polish TUI apply state: per-action status, better result summaries, scrollable modals, and no required rescan after successful apply.
-2. Split `src/tui.rs` into state/render/input/progress modules before adding much more UI behavior.
-3. Improve Go cleanup intelligence with known `go install` rebuild commands for tools like `gopls`, `goimports`, and `dlv`.
-4. Improve Conda cleanup intelligence around duplicate roots, active envs, package caches, and shell init blocks.
-5. Add cautious Homebrew execution paths only after better dry-run/confirmation and ownership metadata.
-6. Add TUI search/filter and deeper app cleanup intelligence.
+1. Improve `brief` into the best possible handoff artifact for humans, Codex, Claude Code, or another agent.
+2. Improve `guide` into the primary interactive workflow: scan, plan, choose apply/manual/handoff/ignore, then verify.
+3. Improve finding structure and evidence quality so all outputs become more trustworthy.
+4. Add ecosystem intelligence only where it makes findings more actionable; hand off ambiguous cleanup instead of over-automating.
+5. Add cautious package-manager execution paths only after better dry-run/confirmation and ownership metadata.
+6. Deepen app cleanup intelligence while keeping deletion Trash-backed and explicitly confirmed.
 
 ### Phase 1: Better reports
 

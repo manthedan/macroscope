@@ -1,5 +1,7 @@
 pub mod apply;
+pub mod brief;
 pub mod findings;
+pub mod guide;
 pub mod markdown;
 pub mod model;
 pub mod output;

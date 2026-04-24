@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use macroscope::{
     apply::{apply_action_plan, dry_run_action_plan, load_or_generate_plan},
+    brief::render_brief,
+    guide::{GuideOptions, run_guide},
     markdown::render_markdown,
     output::{print_explanation, print_summary},
     plan::{generate_action_plan, print_action_plan, render_action_plan_markdown},
@@ -47,6 +49,32 @@ enum Commands {
     Explain {
         /// Path, action ID, bundle ID, or text to explain.
         target: String,
+    },
+
+    /// Generate an AI/human handoff brief.
+    Brief {
+        /// Write the brief to this path. If omitted, print Markdown to stdout.
+        #[arg(long)]
+        markdown: Option<PathBuf>,
+
+        /// Add extra guardrails/instructions for AI coding agents.
+        #[arg(long)]
+        for_llm: bool,
+    },
+
+    /// Walk through scan, plan, decision, handoff, and optional guarded apply.
+    Guide {
+        /// Enable guarded apply controls. Without this, guide is read-only.
+        #[arg(long)]
+        apply: bool,
+
+        /// Handoff brief output path.
+        #[arg(long, default_value = "macroscope-brief.md")]
+        brief: PathBuf,
+
+        /// Run without prompts. This writes reports/briefs and dry-runs only; it never mutates.
+        #[arg(long)]
+        no_prompt: bool,
     },
 
     /// Apply or dry-run an action plan.
@@ -122,6 +150,31 @@ fn main() -> Result<()> {
             let report = scan_with_cli_progress("Scanning before explanation");
             let plan = generate_action_plan(&report);
             print_explanation(&target, &report, &plan);
+        }
+        Commands::Brief { markdown, for_llm } => {
+            let report = scan_with_cli_progress("Scanning for handoff brief");
+            let plan = generate_action_plan(&report);
+            let rendered = render_brief(&report, &plan, for_llm);
+
+            if let Some(path) = markdown {
+                fs::write(&path, rendered).with_context(|| {
+                    format!("failed to write handoff brief to {}", path.display())
+                })?;
+                eprintln!("Wrote {}", path.display());
+            } else {
+                println!("{rendered}");
+            }
+        }
+        Commands::Guide {
+            apply,
+            brief,
+            no_prompt,
+        } => {
+            run_guide(GuideOptions {
+                apply,
+                brief_path: brief,
+                no_prompt,
+            })?;
         }
         Commands::Apply { plan, dry_run, yes } => {
             let plan = load_or_generate_plan(plan.as_deref())?;
