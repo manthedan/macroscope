@@ -23,7 +23,7 @@ cargo run -- tui
 The initial scanner audits:
 
 - System architecture and macOS version
-- Homebrew formulae, casks, and leaves
+- Homebrew formulae, casks, leaves, outdated packages, services, and cleanup dry-run output
 - `/Applications` and `~/Applications`
 - Duplicate macOS app bundle identifiers
 - App versions, bundle IDs, paths, and executable architecture

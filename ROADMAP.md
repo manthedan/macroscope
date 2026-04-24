@@ -39,6 +39,7 @@ Planned:
 - Modified/opened dates where available
 - Quarantine and code-signing status
 - [x] Initial `/usr/local/bin` ownership detection
+- [x] Homebrew outdated packages, services, autoremove preview, and cleanup dry-run
 - Deeper package-manager ownership detection
 
 ### `macroscope tui`
@@ -204,3 +205,4 @@ enum ActionKind {
 - [x] Add `explain` command
 - [x] Add dry-run executor
 - [x] Add safe Trash implementation
+- [x] Add Homebrew cleanup intelligence

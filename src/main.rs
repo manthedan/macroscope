@@ -109,7 +109,20 @@ struct HomebrewReport {
     formulae: Vec<String>,
     casks: Vec<String>,
     leaves: Vec<String>,
+    outdated_formulae: Vec<String>,
+    outdated_casks: Vec<String>,
+    services: Vec<HomebrewService>,
+    autoremove_preview: Vec<String>,
+    cleanup_preview: Vec<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct HomebrewService {
+    name: String,
+    status: Option<String>,
+    user: Option<String>,
+    file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -366,8 +379,52 @@ fn scan_homebrew() -> HomebrewReport {
         .collect();
     report.casks = command_lines_path(&brew_path, &["list", "--cask"]).unwrap_or_default();
     report.leaves = command_lines_path(&brew_path, &["leaves"]).unwrap_or_default();
+    report.outdated_formulae = command_lines_path(&brew_path, &["outdated", "--formula"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|line| first_field(&line).to_string())
+        .collect();
+    report.outdated_casks = command_lines_path(&brew_path, &["outdated", "--cask"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|line| first_field(&line).to_string())
+        .collect();
+    report.services = command_stdout_path(&brew_path, &["services", "list", "--json"])
+        .ok()
+        .and_then(|json| parse_homebrew_services(&json).ok())
+        .unwrap_or_default();
+    report.autoremove_preview = command_lines_path(&brew_path, &["autoremove", "--dry-run"])
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|line| !line.starts_with("Warning:"))
+        .collect();
+    report.cleanup_preview =
+        command_lines_path(&brew_path, &["cleanup", "--dry-run"]).unwrap_or_default();
 
     report
+}
+
+fn parse_homebrew_services(json: &str) -> Result<Vec<HomebrewService>> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    let mut services = Vec::new();
+    for item in items {
+        services.push(HomebrewService {
+            name: json_string(item, "name").unwrap_or_else(|| "unknown".into()),
+            status: json_string(item, "status"),
+            user: json_string(item, "user"),
+            file: json_string(item, "file"),
+        });
+    }
+    services.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(services)
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key)?.as_str().map(String::from)
 }
 
 fn scan_apps() -> AppsReport {
@@ -767,6 +824,31 @@ fn build_findings(
         });
     }
 
+    let outdated_count = homebrew.outdated_formulae.len() + homebrew.outdated_casks.len();
+    if outdated_count > 0 {
+        findings.push(Finding {
+            severity: Severity::Info,
+            title: "Outdated Homebrew packages".into(),
+            detail: format!(
+                "{} formulae and {} casks are outdated.",
+                homebrew.outdated_formulae.len(),
+                homebrew.outdated_casks.len()
+            ),
+        });
+    }
+
+    if !homebrew.cleanup_preview.is_empty() {
+        findings.push(Finding {
+            severity: Severity::Info,
+            title: "Homebrew cleanup can reclaim space".into(),
+            detail: homebrew
+                .cleanup_preview
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "brew cleanup --dry-run returned removable files.".into()),
+        });
+    }
+
     if dev_tools.npm.global_packages.len() > 20 {
         findings.push(Finding {
             severity: Severity::Info,
@@ -913,6 +995,45 @@ fn generate_action_plan(report: &Report) -> ActionPlan {
             destructive: false,
             kind: ActionKind::Manual {
                 instructions: "Install ARM Homebrew in /opt/homebrew, export an inventory from the Intel prefix, reinstall formulae/casks natively, verify command resolution, then retire the Intel prefix only after confirmation.".into(),
+            },
+        });
+    }
+
+    let outdated_count =
+        report.homebrew.outdated_formulae.len() + report.homebrew.outdated_casks.len();
+    if outdated_count > 0 {
+        actions.push(PlannedAction {
+            id: "review-homebrew-outdated".into(),
+            title: format!("Review {outdated_count} outdated Homebrew package(s)"),
+            rationale: format!(
+                "Homebrew reports {} outdated formulae and {} outdated casks. Updates can affect developer tooling, so review before upgrading everything at once.",
+                report.homebrew.outdated_formulae.len(),
+                report.homebrew.outdated_casks.len()
+            ),
+            confidence: Confidence::High,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Run `brew outdated`, review release notes for critical tools, then upgrade selectively with `brew upgrade <name>` or all at once with `brew upgrade`.".into(),
+            },
+        });
+    }
+
+    if !report.homebrew.cleanup_preview.is_empty() {
+        actions.push(PlannedAction {
+            id: "review-homebrew-cleanup".into(),
+            title: "Review Homebrew cleanup dry-run".into(),
+            rationale: report
+                .homebrew
+                .cleanup_preview
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "Homebrew reports cleanup candidates.".into()),
+            confidence: Confidence::High,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Run `brew cleanup --dry-run` to review removable cache/old-version files, then `brew cleanup` when comfortable.".into(),
             },
         });
     }
@@ -1137,7 +1258,34 @@ fn render_markdown(report: &Report) -> String {
     out.push_str(&format!("- prefix: `{}`\n", opt(&report.homebrew.prefix)));
     out.push_str(&format!("- formulae: {}\n", report.homebrew.formulae.len()));
     out.push_str(&format!("- casks: {}\n", report.homebrew.casks.len()));
-    out.push_str(&format!("- leaves: {}\n\n", report.homebrew.leaves.len()));
+    out.push_str(&format!("- leaves: {}\n", report.homebrew.leaves.len()));
+    out.push_str(&format!(
+        "- outdated formulae: {}\n",
+        report.homebrew.outdated_formulae.len()
+    ));
+    out.push_str(&format!(
+        "- outdated casks: {}\n",
+        report.homebrew.outdated_casks.len()
+    ));
+    out.push_str(&format!(
+        "- services: {}\n\n",
+        report.homebrew.services.len()
+    ));
+
+    out.push_str("### Homebrew Outdated Formulae\n\n");
+    push_bullets(&mut out, &report.homebrew.outdated_formulae);
+
+    out.push_str("### Homebrew Outdated Casks\n\n");
+    push_bullets(&mut out, &report.homebrew.outdated_casks);
+
+    out.push_str("### Homebrew Services\n\n");
+    push_homebrew_services_md(&mut out, &report.homebrew.services);
+
+    out.push_str("### Homebrew Autoremove Preview\n\n");
+    push_bullets(&mut out, &report.homebrew.autoremove_preview);
+
+    out.push_str("### Homebrew Cleanup Preview\n\n");
+    push_bullets(&mut out, &report.homebrew.cleanup_preview);
 
     out.push_str("### Homebrew Leaves\n\n");
     push_bullets(&mut out, &report.homebrew.leaves);
@@ -1250,6 +1398,16 @@ fn print_summary(report: &Report) {
         )),
     ]);
     overview.add_row(vec![
+        Cell::new("Homebrew"),
+        Cell::new("outdated / services / cleanup lines"),
+        Cell::new(format!(
+            "{} / {} / {}",
+            report.homebrew.outdated_formulae.len() + report.homebrew.outdated_casks.len(),
+            report.homebrew.services.len(),
+            report.homebrew.cleanup_preview.len()
+        )),
+    ]);
+    overview.add_row(vec![
         Cell::new("Applications"),
         Cell::new("scanned / Intel-only / duplicate IDs"),
         Cell::new(format!(
@@ -1275,6 +1433,7 @@ fn print_summary(report: &Report) {
     ]);
     println!("{overview}");
 
+    print_homebrew_report(report);
     print_app_report(report);
 
     println!("{}", "Developer tools".bold());
@@ -1337,6 +1496,68 @@ fn print_summary(report: &Report) {
         "Tip: run `macroscope tui` for the interactive dashboard, or `macroscope scan --markdown report.md` for a shareable report."
             .dimmed()
     );
+}
+
+fn print_homebrew_report(report: &Report) {
+    if report.homebrew.outdated_formulae.is_empty()
+        && report.homebrew.outdated_casks.is_empty()
+        && report.homebrew.services.is_empty()
+        && report.homebrew.cleanup_preview.is_empty()
+    {
+        return;
+    }
+
+    println!("{}", "Homebrew intelligence".bold());
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_header(vec![Cell::new("Signal"), Cell::new("Details")]);
+    if !report.homebrew.outdated_formulae.is_empty() {
+        table.add_row(vec![
+            Cell::new("Outdated formulae"),
+            Cell::new(report.homebrew.outdated_formulae.join(", ")),
+        ]);
+    }
+    if !report.homebrew.outdated_casks.is_empty() {
+        table.add_row(vec![
+            Cell::new("Outdated casks"),
+            Cell::new(report.homebrew.outdated_casks.join(", ")),
+        ]);
+    }
+    if !report.homebrew.services.is_empty() {
+        table.add_row(vec![
+            Cell::new("Services"),
+            Cell::new(
+                report
+                    .homebrew
+                    .services
+                    .iter()
+                    .map(|svc| {
+                        format!(
+                            "{} ({})",
+                            svc.name,
+                            svc.status.as_deref().unwrap_or("unknown")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        ]);
+    }
+    if !report.homebrew.cleanup_preview.is_empty() {
+        table.add_row(vec![
+            Cell::new("Cleanup preview"),
+            Cell::new(
+                report
+                    .homebrew
+                    .cleanup_preview
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "cleanup candidates found".into()),
+            ),
+        ]);
+    }
+    println!("{table}");
 }
 
 fn print_app_report(report: &Report) {
@@ -1879,6 +2100,11 @@ fn tui_loop<B: Backend>(
                     report.homebrew.leaves.len()
                 )),
                 Line::from(format!(
+                    "Homebrew: {} outdated · {} services",
+                    report.homebrew.outdated_formulae.len() + report.homebrew.outdated_casks.len(),
+                    report.homebrew.services.len()
+                )),
+                Line::from(format!(
                     "Apps: {} scanned · {} Intel-only · {} duplicate IDs",
                     report.apps.apps.len(),
                     intel_apps,
@@ -2416,6 +2642,26 @@ fn tool_line(tool: &ToolVersion) -> String {
         (Some(path), None) => format!("found ({path})"),
         _ => "not found".into(),
     }
+}
+
+fn push_homebrew_services_md(out: &mut String, services: &[HomebrewService]) {
+    if services.is_empty() {
+        out.push_str("None.\n\n");
+        return;
+    }
+
+    out.push_str("| Service | Status | User | Plist |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
+    for service in services {
+        out.push_str(&format!(
+            "| {} | {} | {} | `{}` |\n",
+            md_escape(&service.name),
+            md_escape(service.status.as_deref().unwrap_or("unknown")),
+            md_escape(service.user.as_deref().unwrap_or("none")),
+            md_escape(service.file.as_deref().unwrap_or("none"))
+        ));
+    }
+    out.push('\n');
 }
 
 fn push_app_table_md(out: &mut String, apps: &[AppEntry]) {
