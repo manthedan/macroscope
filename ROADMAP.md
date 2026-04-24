@@ -54,6 +54,11 @@ Planned:
 - Search/filter by severity/category/path
 - Multi-select action staging
 - Scrollable modal/history panes
+- Track per-action status in the TUI: pending, dry-run, applied, skipped, failed
+- Remove or mark applied actions immediately after successful TUI apply so a rescan is not required for feedback
+- Better apply result summaries, including counts for applied/skipped/failed actions
+- Let `a` on the Findings tab apply related executable actions using the same guarded flow as Plan actions
+- Treat `Enter` as a natural open/explain action for the selected item
 - Package-manager action execution after ownership metadata improves
 
 ### `macroscope plan`
@@ -202,6 +207,46 @@ enum ActionKind {
     Manual { instructions: String },
 }
 ```
+
+## Next priorities
+
+1. **Polish TUI apply state**
+   - Track dry-run/applied/failed/skipped status per action.
+   - Update or remove successfully applied actions in-memory.
+   - Improve apply result modals and summaries.
+   - Add scroll support for long dry-run/apply/explain modals.
+   - Extend Findings-tab apply to related executable actions.
+
+2. **Split the TUI module**
+   - `src/tui.rs` is now isolated but still large.
+   - Split into `tui/mod.rs`, `tui/state.rs`, `tui/render.rs`, `tui/input.rs`, and `tui/progress.rs` before adding much more TUI complexity.
+
+3. **Improve Go cleanup intelligence**
+   - Map known Go binaries to rebuild commands, e.g. `gopls`, `goimports`, `dlv`, `staticcheck`.
+   - Group unknown/project-specific Go binaries separately.
+   - Prefer native rebuild guidance before deletion.
+   - Consider stale unknown binary cleanup only when provenance and PATH risk are clear.
+
+4. **Improve Conda cleanup intelligence**
+   - Parse `conda info --envs` style environment details.
+   - Identify active/current root and duplicate root installs.
+   - Detect Conda shell init/PATH blocks in shell startup files.
+   - Generate export/remove guidance, but keep actual removal manual until confidence is high.
+
+5. **Add cautious Homebrew execution paths**
+   - Start with clearer/copyable package-manager commands in the TUI.
+   - Later add explicit action kinds for `brew cleanup`, `brew autoremove`, and `brew install`.
+   - Keep real execution gated by dry-run, plan review, typed confirmation, and ownership confidence.
+
+6. **Add TUI search/filter**
+   - `/` search across findings/actions.
+   - Severity/category/path filters.
+   - `g`/`G` jump to top/bottom.
+
+7. **Deepen app cleanup intelligence**
+   - Include app size, last opened/modified dates, quarantine status, signing status, and cask ownership.
+   - Improve duplicate app handling.
+   - Keep app deletion as Trash-backed and explicitly confirmed.
 
 ## Near-term coding tasks
 

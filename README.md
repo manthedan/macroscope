@@ -113,6 +113,15 @@ Eventually Macroscope should also audit:
 
 ## Roadmap
 
+Near-term priorities are tracked in detail in [`ROADMAP.md`](ROADMAP.md). The next likely work is:
+
+1. Polish TUI apply state: per-action status, better result summaries, scrollable modals, and no required rescan after successful apply.
+2. Split `src/tui.rs` into state/render/input/progress modules before adding much more UI behavior.
+3. Improve Go cleanup intelligence with known `go install` rebuild commands for tools like `gopls`, `goimports`, and `dlv`.
+4. Improve Conda cleanup intelligence around duplicate roots, active envs, package caches, and shell init blocks.
+5. Add cautious Homebrew execution paths only after better dry-run/confirmation and ownership metadata.
+6. Add TUI search/filter and deeper app cleanup intelligence.
+
 ### Phase 1: Better reports
 
 - Add tables for apps and binaries
