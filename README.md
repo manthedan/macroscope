@@ -33,6 +33,8 @@ The initial scanner audits:
 - Node/npm versions and global npm packages
 - Cargo-installed crates
 - Python/uv versions
+- Conda install, platform, envs, env dirs, and package caches
+- Go toolchain, GOPATH/GOBIN/GOROOT, and GOPATH/bin binary architectures
 - Pretty terminal output
 - Interactive TUI dashboard
 - Read-only ActionPlan generation
@@ -90,7 +92,7 @@ Eventually Macroscope should also audit:
 - npm/pnpm/yarn globals
 - Cargo installs and stale crates
 - Python `uv tool`, `pipx`, and user-site packages
-- Go `~/go/bin`
+- richer Go module provenance for `~/go/bin` binaries
 
 ### Phase 3: Explain and plan
 

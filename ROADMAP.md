@@ -40,6 +40,8 @@ Planned:
 - Quarantine and code-signing status
 - [x] Initial `/usr/local/bin` ownership detection
 - [x] Homebrew outdated packages, services, autoremove preview, and cleanup dry-run
+- [x] Conda environment and cache inventory
+- [x] Go toolchain and GOPATH/bin binary architecture inventory
 - Deeper package-manager ownership detection
 
 ### `macroscope tui`
@@ -137,6 +139,7 @@ Execution modes:
 
 - Install Homebrew replacement for standalone Intel CLI
 - Rebuild Cargo-installed tool as native ARM
+- Rebuild Go-installed tool as native ARM
 - Reinstall npm global under current Node
 - Reinstall cask app as universal/ARM
 

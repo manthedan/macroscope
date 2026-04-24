@@ -165,6 +165,8 @@ struct DevToolsReport {
     cargo: CargoReport,
     python: ToolVersion,
     uv: ToolVersion,
+    conda: CondaReport,
+    go: GoReport,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -188,6 +190,37 @@ struct CargoReport {
     cargo: ToolVersion,
     installed: Vec<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct CondaReport {
+    conda: ToolVersion,
+    platform: Option<String>,
+    root_prefix: Option<String>,
+    active_prefix: Option<String>,
+    envs: Vec<String>,
+    envs_dirs: Vec<String>,
+    package_caches: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct GoReport {
+    go: ToolVersion,
+    gopath: Option<String>,
+    gobin: Option<String>,
+    goroot: Option<String>,
+    goos: Option<String>,
+    goarch: Option<String>,
+    bin_dir: Option<PathBuf>,
+    binaries: Vec<GoBinary>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GoBinary {
+    path: PathBuf,
+    arch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -427,6 +460,19 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(String::from)
 }
 
+fn json_string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn scan_apps() -> AppsReport {
     let mut roots = vec![PathBuf::from("/Applications")];
     if let Some(home) = dirs::home_dir() {
@@ -635,6 +681,8 @@ fn scan_dev_tools() -> DevToolsReport {
         cargo: scan_cargo(),
         python: tool_version("python3", &["--version"]),
         uv: tool_version("uv", &["--version"]),
+        conda: scan_conda(),
+        go: scan_go(),
     }
 }
 
@@ -691,6 +739,123 @@ fn scan_cargo() -> CargoReport {
     }
 }
 
+fn scan_conda() -> CondaReport {
+    let Some(conda_path) = which("conda").or_else(find_conda) else {
+        return CondaReport {
+            conda: ToolVersion {
+                error: Some("conda not found in PATH or standard locations".into()),
+                ..Default::default()
+            },
+            error: Some("conda not found".into()),
+            ..Default::default()
+        };
+    };
+
+    let conda = tool_version_path(&conda_path, &["--version"]);
+    let info = command_stdout_path(&conda_path, &["info", "--json"])
+        .ok()
+        .and_then(|json| parse_conda_info(&conda, &json).ok());
+
+    info.unwrap_or_else(|| CondaReport {
+        conda,
+        error: Some("failed to parse `conda info --json`".into()),
+        ..Default::default()
+    })
+}
+
+fn parse_conda_info(conda: &ToolVersion, json: &str) -> Result<CondaReport> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    Ok(CondaReport {
+        conda: ToolVersion {
+            path: conda.path.clone(),
+            version: conda.version.clone(),
+            error: conda.error.clone(),
+        },
+        platform: json_string(&value, "platform"),
+        root_prefix: json_string(&value, "root_prefix")
+            .or_else(|| json_string(&value, "base_prefix"))
+            .or_else(|| json_string(&value, "conda_prefix")),
+        active_prefix: json_string(&value, "active_prefix"),
+        envs: json_string_array(&value, "envs"),
+        envs_dirs: json_string_array(&value, "envs_dirs"),
+        package_caches: json_string_array(&value, "pkgs_dirs"),
+        error: None,
+    })
+}
+
+fn scan_go() -> GoReport {
+    let go_path = which("go").or_else(find_go);
+    let go = go_path
+        .as_ref()
+        .map(|path| tool_version_path(path, &["version"]))
+        .unwrap_or_else(|| ToolVersion {
+            error: Some("go not found in PATH or Homebrew fallback".into()),
+            ..Default::default()
+        });
+
+    let gopath = go_path
+        .as_ref()
+        .and_then(|path| command_stdout_path(path, &["env", "GOPATH"]).ok())
+        .or_else(|| dirs::home_dir().map(|home| home.join("go").display().to_string()));
+    let gobin = go_path
+        .as_ref()
+        .and_then(|path| command_stdout_path(path, &["env", "GOBIN"]).ok())
+        .filter(|value| !value.is_empty());
+    let goroot = go_path
+        .as_ref()
+        .and_then(|path| command_stdout_path(path, &["env", "GOROOT"]).ok());
+    let goos = go_path
+        .as_ref()
+        .and_then(|path| command_stdout_path(path, &["env", "GOOS"]).ok());
+    let goarch = go_path
+        .as_ref()
+        .and_then(|path| command_stdout_path(path, &["env", "GOARCH"]).ok());
+
+    let bin_dir = gobin
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| gopath.as_ref().map(|path| PathBuf::from(path).join("bin")));
+    let binaries = bin_dir
+        .as_ref()
+        .map(|dir| scan_go_binaries(dir))
+        .unwrap_or_default();
+
+    GoReport {
+        go,
+        gopath,
+        gobin,
+        goroot,
+        goos,
+        goarch,
+        bin_dir,
+        binaries,
+        error: None,
+    }
+}
+
+fn scan_go_binaries(dir: &Path) -> Vec<GoBinary> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut binaries = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            continue;
+        }
+        binaries.push(GoBinary {
+            arch: file_arch(&path).ok(),
+            path,
+        });
+    }
+    binaries.sort_by(|a, b| a.path.cmp(&b.path));
+    binaries
+}
+
 fn parse_npm_packages(json: &str) -> Result<Vec<PackageEntry>> {
     let value: serde_json::Value = serde_json::from_str(json)?;
     let mut packages = Vec::new();
@@ -712,18 +877,20 @@ fn parse_npm_packages(json: &str) -> Result<Vec<PackageEntry>> {
 }
 
 fn tool_version(cmd: &str, args: &[&str]) -> ToolVersion {
-    let path = which(cmd).map(|p| p.display().to_string());
-    let version = command_stdout(cmd, args).ok();
-    let error = if path.is_none() {
-        Some(format!("{cmd} not found in PATH"))
-    } else {
-        None
+    let Some(path) = which(cmd) else {
+        return ToolVersion {
+            error: Some(format!("{cmd} not found in PATH")),
+            ..Default::default()
+        };
     };
+    tool_version_path(&path, args)
+}
 
+fn tool_version_path(path: &Path, args: &[&str]) -> ToolVersion {
     ToolVersion {
-        path,
-        version,
-        error,
+        path: Some(path.display().to_string()),
+        version: command_stdout_path(path, args).ok(),
+        error: None,
     }
 }
 
@@ -858,6 +1025,80 @@ fn build_findings(
                 dev_tools.npm.global_packages.len()
             ),
         });
+    }
+
+    if dev_tools.conda.conda.path.is_some() {
+        findings.push(Finding {
+            severity: Severity::Info,
+            title: "Conda installation detected".into(),
+            detail: format!(
+                "conda {} at {}; platform {}; {} env(s).",
+                dev_tools
+                    .conda
+                    .conda
+                    .version
+                    .as_deref()
+                    .unwrap_or("unknown version"),
+                dev_tools
+                    .conda
+                    .root_prefix
+                    .as_deref()
+                    .unwrap_or("unknown prefix"),
+                dev_tools.conda.platform.as_deref().unwrap_or("unknown"),
+                dev_tools.conda.envs.len()
+            ),
+        });
+    }
+
+    let conda_roots = conda_rootish_envs(&dev_tools.conda.envs);
+    if conda_roots.len() > 1 {
+        findings.push(Finding {
+            severity: Severity::Warn,
+            title: "Multiple Conda roots detected".into(),
+            detail: format!(
+                "Conda sees multiple root-like prefixes: {}",
+                conda_roots.join(", ")
+            ),
+        });
+    }
+
+    let intel_go_binaries = intel_go_binaries(&dev_tools.go);
+    if system.arch == "arm64" && !intel_go_binaries.is_empty() {
+        findings.push(Finding {
+            severity: Severity::Warn,
+            title: "Intel-only Go-installed binaries".into(),
+            detail: format!(
+                "{} GOPATH/bin binaries appear Intel-only: {}{}",
+                intel_go_binaries.len(),
+                intel_go_binaries
+                    .iter()
+                    .take(8)
+                    .map(|binary| binary.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if intel_go_binaries.len() > 8 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
+
+    if let Some(bin_dir) = &dev_tools.go.bin_dir {
+        let bin_dir = bin_dir.display().to_string();
+        if !dev_tools.go.binaries.is_empty() && !path.entries.iter().any(|entry| entry == &bin_dir)
+        {
+            findings.push(Finding {
+                severity: Severity::Info,
+                title: "Go bin directory is not on PATH".into(),
+                detail: format!(
+                    "{} contains {} binaries but is not present in PATH.",
+                    bin_dir,
+                    dev_tools.go.binaries.len()
+                ),
+            });
+        }
     }
 
     findings
@@ -1038,6 +1279,52 @@ fn generate_action_plan(report: &Report) -> ActionPlan {
         });
     }
 
+    let conda_roots = conda_rootish_envs(&report.dev_tools.conda.envs);
+    if conda_roots.len() > 1 {
+        actions.push(PlannedAction {
+            id: "review-multiple-conda-roots".into(),
+            title: "Review multiple Conda roots".into(),
+            rationale: format!(
+                "Conda reports multiple root-like prefixes: {}. This can create PATH confusion and duplicate Python/package caches.",
+                conda_roots.join(", ")
+            ),
+            confidence: Confidence::High,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Run `conda info --envs`, identify the active/root install you use, export any important envs, then remove obsolete Conda roots only after backup/export.".into(),
+            },
+        });
+    }
+
+    let intel_go_binaries = intel_go_binaries(&report.dev_tools.go);
+    if !intel_go_binaries.is_empty() {
+        actions.push(PlannedAction {
+            id: "review-intel-go-binaries".into(),
+            title: format!(
+                "Review {} Intel-only Go-installed binaries",
+                intel_go_binaries.len()
+            ),
+            rationale: format!(
+                "{} binaries in GOPATH/bin appear Intel-only. Go-installed CLIs are often rebuilt with `go install <module>@latest`, but module provenance should be confirmed first. Examples: {}{}",
+                intel_go_binaries.len(),
+                intel_go_binaries
+                    .iter()
+                    .take(8)
+                    .map(|binary| binary.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if intel_go_binaries.len() > 8 { ", ..." } else { "" }
+            ),
+            confidence: Confidence::Medium,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "For each Go binary you still need, identify its module, rebuild it with native Go using `go install <module>@latest`, verify the new binary is arm64, then remove stale binaries only after replacement.".into(),
+            },
+        });
+    }
+
     let summary = summarize_actions(&actions);
     ActionPlan { summary, actions }
 }
@@ -1063,6 +1350,25 @@ fn summarize_actions(actions: &[PlannedAction]) -> ActionPlanSummary {
     }
 
     summary
+}
+
+fn intel_go_binaries(go: &GoReport) -> Vec<&GoBinary> {
+    go.binaries
+        .iter()
+        .filter(|binary| {
+            binary
+                .arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .collect()
+}
+
+fn conda_rootish_envs(envs: &[String]) -> Vec<String> {
+    envs.iter()
+        .filter(|env| env.ends_with("/miniconda3") || env.ends_with("/anaconda3"))
+        .cloned()
+        .collect()
 }
 
 fn requires_owner_aware_manual_removal(owner: &str) -> bool {
@@ -1329,6 +1635,8 @@ fn render_markdown(report: &Report) -> String {
     push_tool_md(&mut out, "npm", &report.dev_tools.npm.npm);
     push_tool_md(&mut out, "python3", &report.dev_tools.python);
     push_tool_md(&mut out, "uv", &report.dev_tools.uv);
+    push_tool_md(&mut out, "conda", &report.dev_tools.conda.conda);
+    push_tool_md(&mut out, "go", &report.dev_tools.go.go);
     push_tool_md(&mut out, "cargo", &report.dev_tools.cargo.cargo);
     out.push_str(&format!(
         "\n### Global npm Packages ({})\n\n",
@@ -1346,6 +1654,12 @@ fn render_markdown(report: &Report) -> String {
         report.dev_tools.cargo.installed.len()
     ));
     push_bullets(&mut out, &report.dev_tools.cargo.installed);
+
+    out.push_str("\n### Conda\n\n");
+    push_conda_md(&mut out, &report.dev_tools.conda);
+
+    out.push_str("\n### Go\n\n");
+    push_go_md(&mut out, &report.dev_tools.go);
 
     out.push_str("## PATH\n\n");
     for (idx, entry) in report.path.entries.iter().enumerate() {
@@ -1464,6 +1778,22 @@ fn print_summary(report: &Report) {
     tools.add_row(vec![
         Cell::new("uv"),
         Cell::new(tool_line(&report.dev_tools.uv)),
+    ]);
+    tools.add_row(vec![
+        Cell::new("conda"),
+        Cell::new(format!(
+            "{}; {} envs",
+            tool_line(&report.dev_tools.conda.conda),
+            report.dev_tools.conda.envs.len()
+        )),
+    ]);
+    tools.add_row(vec![
+        Cell::new("go"),
+        Cell::new(format!(
+            "{}; {} GOPATH/bin binaries",
+            tool_line(&report.dev_tools.go.go),
+            report.dev_tools.go.binaries.len()
+        )),
     ]);
     println!("{tools}");
 
@@ -2046,7 +2376,7 @@ fn tui_loop<B: Backend>(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3),
-                    Constraint::Length(9),
+                    Constraint::Length(11),
                     Constraint::Min(8),
                     Constraint::Length(3),
                 ])
@@ -2135,6 +2465,20 @@ fn tui_loop<B: Backend>(
                     report.dev_tools.cargo.installed.len()
                 )),
                 Line::from(format!("python3: {}", tool_line(&report.dev_tools.python))),
+                Line::from(format!(
+                    "conda: {} envs · {}",
+                    report.dev_tools.conda.envs.len(),
+                    report
+                        .dev_tools
+                        .conda
+                        .platform
+                        .as_deref()
+                        .unwrap_or("unknown")
+                )),
+                Line::from(format!(
+                    "go: {} GOPATH/bin binaries",
+                    report.dev_tools.go.binaries.len()
+                )),
             ])
             .block(
                 Block::default()
@@ -2612,6 +2956,26 @@ fn find_homebrew() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+fn find_conda() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from("/opt/anaconda3/bin/conda")];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("miniconda3/bin/conda"));
+        candidates.push(home.join("anaconda3/bin/conda"));
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn find_go() -> Option<PathBuf> {
+    [
+        "/opt/homebrew/bin/go",
+        "/usr/local/go/bin/go",
+        "/usr/local/bin/go",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
 fn which(cmd: &str) -> Option<PathBuf> {
     if cmd.contains('/') {
         let path = PathBuf::from(cmd);
@@ -2641,6 +3005,71 @@ fn tool_line(tool: &ToolVersion) -> String {
         (Some(path), Some(version)) => format!("{version} ({path})"),
         (Some(path), None) => format!("found ({path})"),
         _ => "not found".into(),
+    }
+}
+
+fn push_conda_md(out: &mut String, conda: &CondaReport) {
+    out.push_str(&format!("- conda: {}\n", tool_line(&conda.conda)));
+    out.push_str(&format!(
+        "- platform: `{}`\n",
+        conda.platform.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- root prefix: `{}`\n",
+        conda.root_prefix.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- active prefix: `{}`\n",
+        conda.active_prefix.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str("\n#### Conda envs\n\n");
+    push_bullets(out, &conda.envs);
+    out.push_str("#### Conda env directories\n\n");
+    push_bullets(out, &conda.envs_dirs);
+    out.push_str("#### Conda package caches\n\n");
+    push_bullets(out, &conda.package_caches);
+}
+
+fn push_go_md(out: &mut String, go: &GoReport) {
+    out.push_str(&format!("- go: {}\n", tool_line(&go.go)));
+    out.push_str(&format!(
+        "- GOOS/GOARCH: `{}/{}`\n",
+        go.goos.as_deref().unwrap_or("unknown"),
+        go.goarch.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- GOPATH: `{}`\n",
+        go.gopath.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- GOBIN: `{}`\n",
+        go.gobin.as_deref().unwrap_or("not set")
+    ));
+    out.push_str(&format!(
+        "- GOROOT: `{}`\n",
+        go.goroot.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "- bin dir: `{}`\n\n",
+        go.bin_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unknown".into())
+    ));
+
+    if go.binaries.is_empty() {
+        out.push_str("No GOPATH/bin binaries found.\n\n");
+    } else {
+        out.push_str("| Binary | Architecture |\n");
+        out.push_str("| --- | --- |\n");
+        for binary in &go.binaries {
+            out.push_str(&format!(
+                "| `{}` | {} |\n",
+                md_escape(&binary.path.display().to_string()),
+                md_escape(binary.arch.as_deref().unwrap_or("unknown"))
+            ));
+        }
+        out.push('\n');
     }
 }
 
