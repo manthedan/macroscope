@@ -1,6 +1,49 @@
 # Macroscope Roadmap
 
-Macroscope should become a trustworthy developer-environment archaeologist: it audits a Mac, explains what it found, and produces safe, reversible cleanup or migration plans.
+Macroscope should become a trustworthy developer-environment archaeologist: it audits a Mac, explains what it found, produces safe, reversible cleanup or migration plans, and exports high-quality briefs for humans or AI coding agents.
+
+## Scope
+
+Macroscope should **deeply understand the Mac layer** and **shallowly inventory developer ecosystems**. It should not become a universal package-manager abstraction, a full Conda/Java/npm/Homebrew GUI, or an automatic “fix everything” cleaner.
+
+### In scope: deep Mac/developer hygiene
+
+These are the core product surface:
+
+- Apple Silicon vs Intel architecture mismatches
+- Homebrew prefix/architecture/ownership issues
+- `/usr/local` vs `/opt/homebrew` migration leftovers
+- macOS apps, duplicate bundle IDs, app architecture, cask/app ownership hints
+- local binaries and symlinks, especially `/usr/local/bin`
+- `PATH` order, duplicates, and shell startup pollution
+- package-manager ownership heuristics
+- explainable findings, action plans, dry-runs, Markdown/JSON reports
+- safe reversible cleanup, mostly Trash-backed and explicitly confirmed
+
+### In scope: shallow ecosystem inventory
+
+Common developer ecosystems are worth detecting, but mostly at inventory/explain/recommend depth:
+
+- Homebrew
+- Node/npm/nvm
+- Python/uv/pipx/Conda
+- Rust/Cargo
+- Go/GOPATH binaries
+- JVM/JDK tooling if encountered
+- Docker/OrbStack and editor extensions eventually
+
+For these, Macroscope should answer:
+
+- Is it installed?
+- Where is it installed?
+- Which version and architecture is active?
+- Is it duplicated, stale, off-PATH, or PATH-dominating?
+- Who probably owns it?
+- What should the user review next?
+
+### Out of scope by default: deep ecosystem management
+
+Macroscope should avoid becoming a full manager for every ecosystem. Deep support for specialist stacks should be demand-driven, not speculative. Examples include Ruby, PHP, .NET, Erlang/Elixir, Haskell, Julia, TeX, Android SDK, CUDA, cloud CLIs, and Kubernetes toolchains.
 
 ## Product principles
 
@@ -24,6 +67,17 @@ Macroscope should become a trustworthy developer-environment archaeologist: it a
 5. **Migration beats deletion when possible**
    - For stale Intel tools, suggest native ARM replacements first.
    - Verify replacement before removing the old copy.
+
+6. **Support has levels**
+   - Detect: identify that a tool/ecosystem exists.
+   - Inventory: list roots, versions, architectures, envs, caches, or bins.
+   - Explain: describe likely risk and confidence.
+   - Recommend: suggest safe next steps or copyable commands.
+   - Execute: only for low-risk, reversible, well-understood actions.
+
+7. **Handoff beats overfitting**
+   - Ambiguous, risky, or ecosystem-specific work should be captured in a clear report/brief.
+   - A human or AI coding agent can use that evidence to make context-sensitive decisions.
 
 ## Command roadmap
 
@@ -100,6 +154,28 @@ Should answer:
 - Who probably owns it?
 - Is there a safer native replacement?
 - What actions are available?
+
+### `macroscope brief`
+
+Planned: generate a concise handoff document designed for humans, Codex, Claude Code, or similar AI coding agents.
+
+```bash
+macroscope brief
+macroscope brief --markdown macroscope-brief.md
+macroscope brief --for-llm
+```
+
+The brief should include:
+
+- Machine context: macOS, architecture, shell, Homebrew prefix, PATH summary
+- High-confidence findings
+- Ambiguous findings that need human judgment
+- Suggested next commands, grouped by risk
+- Things Macroscope intentionally will not do automatically
+- Questions an AI agent should ask before mutating the system
+- Raw evidence appendix for traceability
+
+This command is a deliberate scope boundary: Macroscope gathers trustworthy local evidence and proposes safe plans; it does not need to encode every possible ecosystem rule in Rust.
 
 ### `macroscope apply`
 
@@ -221,17 +297,17 @@ enum ActionKind {
    - `src/tui.rs` is now isolated but still large.
    - Split into `tui/mod.rs`, `tui/state.rs`, `tui/render.rs`, `tui/input.rs`, and `tui/progress.rs` before adding much more TUI complexity.
 
-3. **Improve Go cleanup intelligence**
-   - Map known Go binaries to rebuild commands, e.g. `gopls`, `goimports`, `dlv`, `staticcheck`.
-   - Group unknown/project-specific Go binaries separately.
-   - Prefer native rebuild guidance before deletion.
-   - Consider stale unknown binary cleanup only when provenance and PATH risk are clear.
+3. **Add an AI/human handoff brief**
+   - Add `macroscope brief` as a first-class command.
+   - Produce a compact Markdown document suitable for Codex, Claude Code, or a human reviewer.
+   - Separate high-confidence evidence from ambiguous ecosystem-specific findings.
+   - Include “do not automate” warnings and questions to ask before cleanup.
 
-4. **Improve Conda cleanup intelligence**
-   - Parse `conda info --envs` style environment details.
-   - Identify active/current root and duplicate root installs.
-   - Detect Conda shell init/PATH blocks in shell startup files.
-   - Generate export/remove guidance, but keep actual removal manual until confidence is high.
+4. **Improve ecosystem intelligence only where it makes findings more actionable**
+   - Keep Go/Conda/JVM/etc. support shallow unless real evidence or user demand justifies deeper work.
+   - Prefer known rebuild/export/review commands over custom ecosystem managers.
+   - Group unknown/project-specific tools separately instead of pretending to understand them.
+   - Move ambiguous cleanup into the handoff brief rather than risky automated actions.
 
 5. **Add cautious Homebrew execution paths**
    - Start with clearer/copyable package-manager commands in the TUI.
