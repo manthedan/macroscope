@@ -1,0 +1,1919 @@
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use comfy_table::{Cell, Table, presets::UTF8_FULL};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use owo_colors::OwoColorize;
+use plist::Value;
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+use walkdir::WalkDir;
+
+#[derive(Parser, Debug)]
+#[command(name = "macroscope")]
+#[command(about = "Audit your macOS developer environment", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Scan this Mac and print a pretty developer-environment audit.
+    Scan {
+        /// Write a Markdown report to this path.
+        #[arg(long)]
+        markdown: Option<PathBuf>,
+
+        /// Emit JSON instead of the pretty text summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate a read-only cleanup/migration action plan.
+    Plan {
+        /// Write a Markdown action plan to this path.
+        #[arg(long)]
+        markdown: Option<PathBuf>,
+
+        /// Emit JSON instead of the pretty text plan.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Explain a path, action ID, bundle ID, or finding text.
+    Explain {
+        /// Path, action ID, bundle ID, or text to explain.
+        target: String,
+    },
+
+    /// Dry-run an action plan without modifying the system.
+    Apply {
+        /// Read an action plan JSON file. If omitted, generate a fresh plan.
+        plan: Option<PathBuf>,
+
+        /// Required for now: print what would happen without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Open an interactive terminal dashboard.
+    Tui,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
+    system: SystemReport,
+    homebrew: HomebrewReport,
+    apps: AppsReport,
+    local_bins: Vec<BinEntry>,
+    path: PathReport,
+    dev_tools: DevToolsReport,
+    findings: Vec<Finding>,
+}
+
+#[derive(Debug, Serialize)]
+struct SystemReport {
+    arch: String,
+    macos: String,
+    shell: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct HomebrewReport {
+    brew_path: Option<String>,
+    prefix: Option<String>,
+    formulae: Vec<String>,
+    casks: Vec<String>,
+    leaves: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppsReport {
+    scanned_roots: Vec<PathBuf>,
+    apps: Vec<AppEntry>,
+    duplicate_bundle_ids: BTreeMap<String, Vec<PathBuf>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppEntry {
+    path: PathBuf,
+    name: Option<String>,
+    bundle_id: Option<String>,
+    version: Option<String>,
+    executable: Option<PathBuf>,
+    executable_arch: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BinEntry {
+    path: PathBuf,
+    kind: String,
+    arch: Option<String>,
+    target: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct PathReport {
+    entries: Vec<String>,
+    duplicates: BTreeMap<String, usize>,
+    opt_homebrew_before_usr_local: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct DevToolsReport {
+    node: ToolVersion,
+    npm: NpmReport,
+    cargo: CargoReport,
+    python: ToolVersion,
+    uv: ToolVersion,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct ToolVersion {
+    path: Option<String>,
+    version: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct NpmReport {
+    npm: ToolVersion,
+    prefix: Option<String>,
+    root: Option<String>,
+    global_packages: Vec<PackageEntry>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default)]
+struct CargoReport {
+    cargo: ToolVersion,
+    installed: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PackageEntry {
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Finding {
+    severity: Severity,
+    title: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Severity {
+    Info,
+    Warn,
+    Risk,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ActionPlan {
+    summary: ActionPlanSummary,
+    actions: Vec<PlannedAction>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ActionPlanSummary {
+    total: usize,
+    destructive: usize,
+    low_risk: usize,
+    medium_risk: usize,
+    high_risk: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PlannedAction {
+    id: String,
+    title: String,
+    rationale: String,
+    confidence: Confidence,
+    risk: ActionRisk,
+    destructive: bool,
+    kind: ActionKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ActionRisk {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum ActionKind {
+    MoveToTrash { path: PathBuf },
+    BrewInstall { package: String },
+    Manual { instructions: String },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Scan { markdown, json } => {
+            let report = scan();
+
+            if let Some(path) = markdown {
+                let rendered = render_markdown(&report);
+                fs::write(&path, rendered).with_context(|| {
+                    format!("failed to write Markdown report to {}", path.display())
+                })?;
+                eprintln!("Wrote {}", path.display());
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_summary(&report);
+            }
+        }
+        Commands::Plan { markdown, json } => {
+            let report = scan();
+            let plan = generate_action_plan(&report);
+
+            if let Some(path) = markdown {
+                let rendered = render_action_plan_markdown(&plan);
+                fs::write(&path, rendered).with_context(|| {
+                    format!("failed to write Markdown action plan to {}", path.display())
+                })?;
+                eprintln!("Wrote {}", path.display());
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print_action_plan(&plan);
+            }
+        }
+        Commands::Explain { target } => {
+            let report = scan();
+            let plan = generate_action_plan(&report);
+            print_explanation(&target, &report, &plan);
+        }
+        Commands::Apply { plan, dry_run } => {
+            if !dry_run {
+                anyhow::bail!("only `macroscope apply --dry-run` is implemented so far");
+            }
+            let plan = load_or_generate_plan(plan.as_deref())?;
+            dry_run_action_plan(&plan);
+        }
+        Commands::Tui => {
+            let report = scan();
+            let plan = generate_action_plan(&report);
+            run_tui(&report, &plan)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn scan() -> Report {
+    let system = scan_system();
+    let homebrew = scan_homebrew();
+    let apps = scan_apps();
+    let local_bins = scan_local_bins(Path::new("/usr/local/bin"));
+    let path = scan_path();
+    let dev_tools = scan_dev_tools();
+
+    let findings = build_findings(&system, &homebrew, &apps, &local_bins, &path, &dev_tools);
+
+    Report {
+        system,
+        homebrew,
+        apps,
+        local_bins,
+        path,
+        dev_tools,
+        findings,
+    }
+}
+
+fn scan_system() -> SystemReport {
+    SystemReport {
+        arch: command_stdout("uname", &["-m"]).unwrap_or_else(|_| env::consts::ARCH.to_string()),
+        macos: command_stdout("sw_vers", &["-productVersion"]).unwrap_or_else(|_| "unknown".into()),
+        shell: env::var("SHELL").ok(),
+    }
+}
+
+fn scan_homebrew() -> HomebrewReport {
+    let Some(brew_path) = which("brew").or_else(find_homebrew) else {
+        return HomebrewReport {
+            error: Some("brew not found in PATH or standard Homebrew locations".into()),
+            ..Default::default()
+        };
+    };
+
+    let mut report = HomebrewReport {
+        brew_path: Some(brew_path.display().to_string()),
+        ..Default::default()
+    };
+
+    report.prefix = command_stdout_path(&brew_path, &["--prefix"]).ok();
+    report.formulae = command_lines_path(&brew_path, &["list", "--formula", "--versions"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|line| first_field(&line).to_string())
+        .collect();
+    report.casks = command_lines_path(&brew_path, &["list", "--cask"]).unwrap_or_default();
+    report.leaves = command_lines_path(&brew_path, &["leaves"]).unwrap_or_default();
+
+    report
+}
+
+fn scan_apps() -> AppsReport {
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+
+    let mut apps = Vec::new();
+
+    for root in &roots {
+        if !root.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(root)
+            .max_depth(2)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension() == Some(OsStr::new("app")) && path.is_dir() {
+                apps.push(read_app(path));
+            }
+        }
+    }
+
+    apps.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut bundle_map: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for app in &apps {
+        if let Some(bundle_id) = &app.bundle_id {
+            bundle_map
+                .entry(bundle_id.clone())
+                .or_default()
+                .push(app.path.clone());
+        }
+    }
+    bundle_map.retain(|_, paths| paths.len() > 1);
+
+    AppsReport {
+        scanned_roots: roots,
+        apps,
+        duplicate_bundle_ids: bundle_map,
+    }
+}
+
+fn read_app(path: &Path) -> AppEntry {
+    let info_plist = path.join("Contents/Info.plist");
+    let plist = Value::from_file(&info_plist).ok();
+
+    let name = plist_string(&plist, "CFBundleDisplayName")
+        .or_else(|| plist_string(&plist, "CFBundleName"))
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
+    let bundle_id = plist_string(&plist, "CFBundleIdentifier");
+    let version = plist_string(&plist, "CFBundleShortVersionString")
+        .or_else(|| plist_string(&plist, "CFBundleVersion"));
+    let executable =
+        plist_string(&plist, "CFBundleExecutable").map(|exe| path.join("Contents/MacOS").join(exe));
+    let executable_arch = executable.as_ref().and_then(|exe| file_arch(exe).ok());
+
+    AppEntry {
+        path: path.to_path_buf(),
+        name,
+        bundle_id,
+        version,
+        executable,
+        executable_arch,
+    }
+}
+
+fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut bins = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+
+        if metadata.is_dir() {
+            continue;
+        }
+
+        let target = if metadata.file_type().is_symlink() {
+            fs::read_link(&path).ok()
+        } else {
+            None
+        };
+        let kind = if metadata.file_type().is_symlink() {
+            "symlink"
+        } else {
+            "file"
+        }
+        .to_string();
+        let arch = file_arch(&path).ok();
+
+        bins.push(BinEntry {
+            path,
+            kind,
+            arch,
+            target,
+        });
+    }
+
+    bins.sort_by(|a, b| a.path.cmp(&b.path));
+    bins
+}
+
+fn scan_path() -> PathReport {
+    let entries: Vec<String> = env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in &entries {
+        *counts.entry(entry.clone()).or_default() += 1;
+    }
+    counts.retain(|_, count| *count > 1);
+
+    let opt = entries.iter().position(|p| p == "/opt/homebrew/bin");
+    let usr = entries.iter().position(|p| p == "/usr/local/bin");
+    let opt_homebrew_before_usr_local = match (opt, usr) {
+        (Some(o), Some(u)) => Some(o < u),
+        _ => None,
+    };
+
+    PathReport {
+        entries,
+        duplicates: counts,
+        opt_homebrew_before_usr_local,
+    }
+}
+
+fn scan_dev_tools() -> DevToolsReport {
+    DevToolsReport {
+        node: tool_version("node", &["--version"]),
+        npm: scan_npm(),
+        cargo: scan_cargo(),
+        python: tool_version("python3", &["--version"]),
+        uv: tool_version("uv", &["--version"]),
+    }
+}
+
+fn scan_npm() -> NpmReport {
+    let npm = tool_version("npm", &["--version"]);
+    if npm.path.is_none() {
+        return NpmReport {
+            npm,
+            error: Some("npm not found in PATH".into()),
+            ..Default::default()
+        };
+    }
+
+    let prefix = command_stdout("npm", &["prefix", "-g"]).ok();
+    let root = command_stdout("npm", &["root", "-g"]).ok();
+    let global_packages = command_stdout("npm", &["list", "-g", "--depth=0", "--json"])
+        .ok()
+        .and_then(|json| parse_npm_packages(&json).ok())
+        .unwrap_or_default();
+
+    NpmReport {
+        npm,
+        prefix,
+        root,
+        global_packages,
+        error: None,
+    }
+}
+
+fn scan_cargo() -> CargoReport {
+    let cargo = tool_version("cargo", &["--version"]);
+    if cargo.path.is_none() {
+        return CargoReport {
+            cargo,
+            error: Some("cargo not found in PATH".into()),
+            ..Default::default()
+        };
+    }
+
+    let installed = command_stdout("cargo", &["install", "--list"])
+        .ok()
+        .map(|out| {
+            out.lines()
+                .filter(|line| !line.starts_with(' ') && line.contains(' '))
+                .map(|line| line.trim_end_matches(':').to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    CargoReport {
+        cargo,
+        installed,
+        error: None,
+    }
+}
+
+fn parse_npm_packages(json: &str) -> Result<Vec<PackageEntry>> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let mut packages = Vec::new();
+
+    if let Some(deps) = value.get("dependencies").and_then(|d| d.as_object()) {
+        for (name, meta) in deps {
+            packages.push(PackageEntry {
+                name: name.clone(),
+                version: meta
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            });
+        }
+    }
+
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(packages)
+}
+
+fn tool_version(cmd: &str, args: &[&str]) -> ToolVersion {
+    let path = which(cmd).map(|p| p.display().to_string());
+    let version = command_stdout(cmd, args).ok();
+    let error = if path.is_none() {
+        Some(format!("{cmd} not found in PATH"))
+    } else {
+        None
+    };
+
+    ToolVersion {
+        path,
+        version,
+        error,
+    }
+}
+
+fn build_findings(
+    system: &SystemReport,
+    homebrew: &HomebrewReport,
+    apps: &AppsReport,
+    local_bins: &[BinEntry],
+    path: &PathReport,
+    dev_tools: &DevToolsReport,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    if system.arch == "arm64" {
+        for bin in local_bins {
+            if bin
+                .arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+            {
+                findings.push(Finding {
+                    severity: Severity::Risk,
+                    title: "Intel-only binary in /usr/local/bin".into(),
+                    detail: format!(
+                        "{} appears to be {}",
+                        bin.path.display(),
+                        bin.arch.as_deref().unwrap_or("unknown")
+                    ),
+                });
+            }
+        }
+
+        for app in &apps.apps {
+            if app
+                .executable_arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+            {
+                findings.push(Finding {
+                    severity: Severity::Warn,
+                    title: "Intel-only app executable".into(),
+                    detail: format!(
+                        "{} appears to be {}",
+                        app.path.display(),
+                        app.executable_arch.as_deref().unwrap_or("unknown")
+                    ),
+                });
+            }
+        }
+    }
+
+    if !apps.duplicate_bundle_ids.is_empty() {
+        for (bundle_id, paths) in &apps.duplicate_bundle_ids {
+            findings.push(Finding {
+                severity: Severity::Warn,
+                title: "Duplicate app bundle identifier".into(),
+                detail: format!(
+                    "{bundle_id}: {}",
+                    paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+    }
+
+    if !path.duplicates.is_empty() {
+        findings.push(Finding {
+            severity: Severity::Info,
+            title: "Duplicate PATH entries".into(),
+            detail: path
+                .duplicates
+                .iter()
+                .map(|(entry, count)| format!("{entry} ({count}x)"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        });
+    }
+
+    if path.opt_homebrew_before_usr_local == Some(false) {
+        findings.push(Finding {
+            severity: Severity::Warn,
+            title: "/usr/local/bin precedes /opt/homebrew/bin".into(),
+            detail:
+                "On Apple Silicon, ARM Homebrew should usually come before legacy /usr/local/bin."
+                    .into(),
+        });
+    }
+
+    if homebrew.prefix.as_deref() == Some("/usr/local") && system.arch == "arm64" {
+        findings.push(Finding {
+            severity: Severity::Risk,
+            title: "Intel Homebrew appears active on Apple Silicon".into(),
+            detail: "brew --prefix returned /usr/local".into(),
+        });
+    }
+
+    if dev_tools.npm.global_packages.len() > 20 {
+        findings.push(Finding {
+            severity: Severity::Info,
+            title: "Many global npm packages".into(),
+            detail: format!(
+                "{} packages installed globally; consider whether any are stale.",
+                dev_tools.npm.global_packages.len()
+            ),
+        });
+    }
+
+    findings
+}
+
+fn generate_action_plan(report: &Report) -> ActionPlan {
+    let mut actions = Vec::new();
+    let mut suggested_brew_packages = BTreeSet::new();
+
+    for bin in &report.local_bins {
+        let Some(arch) = &bin.arch else {
+            continue;
+        };
+        if !(arch.contains("x86_64") && !arch.contains("arm64")) {
+            continue;
+        }
+
+        let name = bin
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".into());
+
+        if let Some(package) = known_brew_replacement(&name) {
+            if suggested_brew_packages.insert(package.to_string()) {
+                actions.push(PlannedAction {
+                id: format!("brew-install-{}", slugify(package)),
+                title: format!("Install native ARM Homebrew replacement for `{name}`"),
+                rationale: format!(
+                    "`{}` is Intel-only on an ARM Mac. `{package}` is a likely Homebrew replacement. Install and verify the replacement before removing the old binary.",
+                    bin.path.display()
+                ),
+                confidence: Confidence::Medium,
+                risk: ActionRisk::Medium,
+                destructive: false,
+                    kind: ActionKind::BrewInstall {
+                        package: package.to_string(),
+                    },
+                });
+            }
+        }
+
+        actions.push(PlannedAction {
+            id: format!("trash-{}", slugify(&bin.path.display().to_string())),
+            title: format!("Move stale Intel binary `{name}` to Trash"),
+            rationale: format!(
+                "`{}` is an Intel-only binary in `/usr/local/bin`. On Apple Silicon this is likely a legacy/manual install. Move to Trash only after confirming it is unused or replaced.",
+                bin.path.display()
+            ),
+            confidence: if known_brew_replacement(&name).is_some() {
+                Confidence::Medium
+            } else {
+                Confidence::Low
+            },
+            risk: ActionRisk::Medium,
+            destructive: true,
+            kind: ActionKind::MoveToTrash {
+                path: bin.path.clone(),
+            },
+        });
+    }
+
+    for (bundle_id, paths) in &report.apps.duplicate_bundle_ids {
+        actions.push(PlannedAction {
+            id: format!("review-duplicate-app-{}", slugify(bundle_id)),
+            title: format!("Review duplicate app bundle ID `{bundle_id}`"),
+            rationale: format!(
+                "Multiple app bundles share the same identifier, which can confuse macOS permissions, updates, and automation: {}",
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            confidence: Confidence::High,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Open both app bundles, identify the one you actually use, then remove only the obsolete duplicate after backing up anything important.".into(),
+            },
+        });
+    }
+
+    if !report.path.duplicates.is_empty() {
+        actions.push(PlannedAction {
+            id: "review-duplicate-path-entries".into(),
+            title: "Review duplicate PATH entries".into(),
+            rationale: format!(
+                "The current shell PATH contains duplicate entries: {}",
+                report
+                    .path
+                    .duplicates
+                    .iter()
+                    .map(|(entry, count)| format!("{entry} ({count}x)"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            confidence: Confidence::High,
+            risk: ActionRisk::Low,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Inspect shell startup files such as ~/.zprofile, ~/.zshrc, ~/.profile, and package-manager init blocks. Remove only redundant PATH exports.".into(),
+            },
+        });
+    }
+
+    if report.homebrew.prefix.as_deref() == Some("/usr/local") && report.system.arch == "arm64" {
+        actions.push(PlannedAction {
+            id: "migrate-intel-homebrew-to-arm".into(),
+            title: "Migrate Intel Homebrew to native ARM Homebrew".into(),
+            rationale: "This ARM Mac appears to be using `/usr/local` Homebrew. Native Apple Silicon Homebrew should usually live at `/opt/homebrew`.".into(),
+            confidence: Confidence::High,
+            risk: ActionRisk::High,
+            destructive: false,
+            kind: ActionKind::Manual {
+                instructions: "Install ARM Homebrew in /opt/homebrew, export an inventory from the Intel prefix, reinstall formulae/casks natively, verify command resolution, then retire the Intel prefix only after confirmation.".into(),
+            },
+        });
+    }
+
+    let summary = summarize_actions(&actions);
+    ActionPlan { summary, actions }
+}
+
+fn summarize_actions(actions: &[PlannedAction]) -> ActionPlanSummary {
+    let mut summary = ActionPlanSummary {
+        total: actions.len(),
+        destructive: 0,
+        low_risk: 0,
+        medium_risk: 0,
+        high_risk: 0,
+    };
+
+    for action in actions {
+        if action.destructive {
+            summary.destructive += 1;
+        }
+        match action.risk {
+            ActionRisk::Low => summary.low_risk += 1,
+            ActionRisk::Medium => summary.medium_risk += 1,
+            ActionRisk::High => summary.high_risk += 1,
+        }
+    }
+
+    summary
+}
+
+fn known_brew_replacement(binary_name: &str) -> Option<&'static str> {
+    match binary_name {
+        "aws" | "aws_completer" => Some("awscli"),
+        _ => None,
+    }
+}
+
+fn render_action_plan_markdown(plan: &ActionPlan) -> String {
+    let mut out = String::new();
+    out.push_str("# Macroscope Action Plan\n\n");
+    out.push_str("> Read-only generated plan. Review carefully before taking any action.\n\n");
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!("- Total actions: {}\n", plan.summary.total));
+    out.push_str(&format!(
+        "- Destructive actions: {}\n",
+        plan.summary.destructive
+    ));
+    out.push_str(&format!("- Low risk: {}\n", plan.summary.low_risk));
+    out.push_str(&format!("- Medium risk: {}\n", plan.summary.medium_risk));
+    out.push_str(&format!("- High risk: {}\n\n", plan.summary.high_risk));
+
+    if plan.actions.is_empty() {
+        out.push_str("No actions proposed.\n");
+        return out;
+    }
+
+    out.push_str("## Actions\n\n");
+    for action in &plan.actions {
+        out.push_str(&format!("### `{}` — {}\n\n", action.id, action.title));
+        out.push_str(&format!("- Confidence: `{:?}`\n", action.confidence));
+        out.push_str(&format!("- Risk: `{:?}`\n", action.risk));
+        out.push_str(&format!("- Destructive: `{}`\n", action.destructive));
+        out.push_str(&format!("- Kind: `{}`\n", action_kind_label(&action.kind)));
+        out.push_str(&format!("\n{}\n\n", action.rationale));
+        out.push_str("Suggested command/instruction:\n\n");
+        out.push_str(&format!("```text\n{}\n```\n\n", action_instruction(action)));
+    }
+
+    out
+}
+
+fn print_action_plan(plan: &ActionPlan) {
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Action Plan".bright_cyan().bold()
+    );
+    println!(
+        "{}",
+        "Read-only suggestions. Nothing has been changed.".dimmed()
+    );
+    println!();
+
+    let mut summary = Table::new();
+    summary.load_preset(UTF8_FULL).set_header(vec![
+        Cell::new("Total"),
+        Cell::new("Destructive"),
+        Cell::new("Low risk"),
+        Cell::new("Medium risk"),
+        Cell::new("High risk"),
+    ]);
+    summary.add_row(vec![
+        Cell::new(plan.summary.total),
+        Cell::new(plan.summary.destructive),
+        Cell::new(plan.summary.low_risk),
+        Cell::new(plan.summary.medium_risk),
+        Cell::new(plan.summary.high_risk),
+    ]);
+    println!("{summary}");
+
+    if plan.actions.is_empty() {
+        println!("{}", "No actions proposed. Nice.".green());
+        return;
+    }
+
+    for action in &plan.actions {
+        println!(
+            "{} {} {}",
+            risk_badge(action.risk),
+            confidence_badge(action.confidence),
+            action.title.bold()
+        );
+        println!("  {}", action.rationale.dimmed());
+        println!("  {} {}", "Action:".bold(), action_instruction(action));
+        if action.destructive {
+            println!(
+                "  {}",
+                "Destructive: review and prefer Trash/dry-run before applying."
+                    .red()
+                    .bold()
+            );
+        }
+        println!();
+    }
+
+    println!(
+        "{}",
+        "Tip: `macroscope plan --markdown cleanup-plan.md` writes this as a reviewable document."
+            .dimmed()
+    );
+}
+
+fn action_kind_label(kind: &ActionKind) -> &'static str {
+    match kind {
+        ActionKind::MoveToTrash { .. } => "move-to-trash",
+        ActionKind::BrewInstall { .. } => "brew-install",
+        ActionKind::Manual { .. } => "manual",
+    }
+}
+
+fn action_instruction(action: &PlannedAction) -> String {
+    match &action.kind {
+        ActionKind::MoveToTrash { path } => format!(
+            "Move `{}` to Trash after confirming it is unused or replaced.",
+            path.display()
+        ),
+        ActionKind::BrewInstall { package } => format!("brew install {package}"),
+        ActionKind::Manual { instructions } => instructions.clone(),
+    }
+}
+
+fn risk_badge(risk: ActionRisk) -> String {
+    match risk {
+        ActionRisk::Low => "LOW".green().bold().to_string(),
+        ActionRisk::Medium => "MED".yellow().bold().to_string(),
+        ActionRisk::High => "HIGH".red().bold().to_string(),
+    }
+}
+
+fn confidence_badge(confidence: Confidence) -> String {
+    match confidence {
+        Confidence::Low => "low-confidence".dimmed().to_string(),
+        Confidence::Medium => "medium-confidence".blue().to_string(),
+        Confidence::High => "high-confidence".green().to_string(),
+    }
+}
+
+fn slugify(input: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn render_markdown(report: &Report) -> String {
+    let mut out = String::new();
+    out.push_str("# Macroscope Report\n\n");
+
+    out.push_str("## System\n\n");
+    out.push_str(&format!("- Architecture: `{}`\n", report.system.arch));
+    out.push_str(&format!("- macOS: `{}`\n", report.system.macos));
+    if let Some(shell) = &report.system.shell {
+        out.push_str(&format!("- Shell: `{shell}`\n"));
+    }
+    out.push('\n');
+
+    out.push_str("## Findings\n\n");
+    if report.findings.is_empty() {
+        out.push_str("No notable findings.\n\n");
+    } else {
+        for finding in &report.findings {
+            out.push_str(&format!(
+                "- **{:?}**: {} — {}\n",
+                finding.severity, finding.title, finding.detail
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Homebrew\n\n");
+    out.push_str(&format!("- brew: `{}`\n", opt(&report.homebrew.brew_path)));
+    out.push_str(&format!("- prefix: `{}`\n", opt(&report.homebrew.prefix)));
+    out.push_str(&format!("- formulae: {}\n", report.homebrew.formulae.len()));
+    out.push_str(&format!("- casks: {}\n", report.homebrew.casks.len()));
+    out.push_str(&format!("- leaves: {}\n\n", report.homebrew.leaves.len()));
+
+    out.push_str("### Homebrew Leaves\n\n");
+    push_bullets(&mut out, &report.homebrew.leaves);
+
+    out.push_str("## Applications\n\n");
+    out.push_str(&format!("Scanned {} apps.\n\n", report.apps.apps.len()));
+    if !report.apps.duplicate_bundle_ids.is_empty() {
+        out.push_str("### Duplicate Bundle IDs\n\n");
+        for (bundle_id, paths) in &report.apps.duplicate_bundle_ids {
+            out.push_str(&format!("- `{bundle_id}`\n"));
+            for path in paths {
+                out.push_str(&format!("  - `{}`\n", path.display()));
+            }
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## /usr/local/bin\n\n");
+    if report.local_bins.is_empty() {
+        out.push_str("No entries found or directory missing.\n\n");
+    } else {
+        for bin in &report.local_bins {
+            out.push_str(&format!("- `{}` — {}", bin.path.display(), bin.kind));
+            if let Some(arch) = &bin.arch {
+                out.push_str(&format!(", `{arch}`"));
+            }
+            if let Some(target) = &bin.target {
+                out.push_str(&format!(", -> `{}`", target.display()));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Developer Tools\n\n");
+    push_tool_md(&mut out, "node", &report.dev_tools.node);
+    push_tool_md(&mut out, "npm", &report.dev_tools.npm.npm);
+    push_tool_md(&mut out, "python3", &report.dev_tools.python);
+    push_tool_md(&mut out, "uv", &report.dev_tools.uv);
+    push_tool_md(&mut out, "cargo", &report.dev_tools.cargo.cargo);
+    out.push_str(&format!(
+        "\n### Global npm Packages ({})\n\n",
+        report.dev_tools.npm.global_packages.len()
+    ));
+    for package in &report.dev_tools.npm.global_packages {
+        out.push_str(&format!(
+            "- `{}` `{}`\n",
+            package.name,
+            package.version.as_deref().unwrap_or("unknown")
+        ));
+    }
+    out.push_str(&format!(
+        "\n### Cargo-installed Crates ({})\n\n",
+        report.dev_tools.cargo.installed.len()
+    ));
+    push_bullets(&mut out, &report.dev_tools.cargo.installed);
+
+    out.push_str("## PATH\n\n");
+    for (idx, entry) in report.path.entries.iter().enumerate() {
+        out.push_str(&format!("{}. `{entry}`\n", idx + 1));
+    }
+
+    out
+}
+
+fn print_summary(report: &Report) {
+    let (risks, warns, infos) = finding_counts(report);
+    let intel_bins = intel_bin_count(report);
+    let intel_apps = intel_app_count(report);
+
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope".bright_cyan().bold()
+    );
+    println!(
+        "{}",
+        "A local-first audit of this Mac developer environment".dimmed()
+    );
+    println!();
+
+    let mut overview = Table::new();
+    overview.load_preset(UTF8_FULL).set_header(vec![
+        Cell::new("Area"),
+        Cell::new("Signal"),
+        Cell::new("Value"),
+    ]);
+    overview.add_row(vec![
+        Cell::new("System"),
+        Cell::new("macOS / arch"),
+        Cell::new(format!("{} / {}", report.system.macos, report.system.arch)),
+    ]);
+    overview.add_row(vec![
+        Cell::new("Homebrew"),
+        Cell::new("prefix"),
+        Cell::new(opt(&report.homebrew.prefix)),
+    ]);
+    overview.add_row(vec![
+        Cell::new("Homebrew"),
+        Cell::new("formulae / casks / leaves"),
+        Cell::new(format!(
+            "{} / {} / {}",
+            report.homebrew.formulae.len(),
+            report.homebrew.casks.len(),
+            report.homebrew.leaves.len()
+        )),
+    ]);
+    overview.add_row(vec![
+        Cell::new("Applications"),
+        Cell::new("scanned / Intel-only / duplicate IDs"),
+        Cell::new(format!(
+            "{} / {} / {}",
+            report.apps.apps.len(),
+            intel_apps,
+            report.apps.duplicate_bundle_ids.len()
+        )),
+    ]);
+    overview.add_row(vec![
+        Cell::new("/usr/local/bin"),
+        Cell::new("entries / Intel-only"),
+        Cell::new(format!("{} / {}", report.local_bins.len(), intel_bins)),
+    ]);
+    overview.add_row(vec![
+        Cell::new("PATH"),
+        Cell::new("entries / duplicates"),
+        Cell::new(format!(
+            "{} / {}",
+            report.path.entries.len(),
+            report.path.duplicates.len()
+        )),
+    ]);
+    println!("{overview}");
+
+    println!("{}", "Developer tools".bold());
+    let mut tools = Table::new();
+    tools
+        .load_preset(UTF8_FULL)
+        .set_header(vec![Cell::new("Tool"), Cell::new("Version / location")]);
+    tools.add_row(vec![
+        Cell::new("node"),
+        Cell::new(tool_line(&report.dev_tools.node)),
+    ]);
+    tools.add_row(vec![
+        Cell::new("npm"),
+        Cell::new(tool_line(&report.dev_tools.npm.npm)),
+    ]);
+    tools.add_row(vec![
+        Cell::new("npm globals"),
+        Cell::new(report.dev_tools.npm.global_packages.len()),
+    ]);
+    tools.add_row(vec![
+        Cell::new("cargo installs"),
+        Cell::new(report.dev_tools.cargo.installed.len()),
+    ]);
+    tools.add_row(vec![
+        Cell::new("python3"),
+        Cell::new(tool_line(&report.dev_tools.python)),
+    ]);
+    tools.add_row(vec![
+        Cell::new("uv"),
+        Cell::new(tool_line(&report.dev_tools.uv)),
+    ]);
+    println!("{tools}");
+
+    println!(
+        "{} {} {} {} {} {}",
+        "Findings".bold(),
+        format!("{risks} risk").red().bold(),
+        "·".dimmed(),
+        format!("{warns} warn").yellow().bold(),
+        "·".dimmed(),
+        format!("{infos} info").blue().bold()
+    );
+
+    if report.findings.is_empty() {
+        println!("  {}", "No notable findings. Nice.".green());
+    } else {
+        for finding in &report.findings {
+            println!(
+                "  {} {}",
+                severity_badge(&finding.severity),
+                finding.title.bold()
+            );
+            println!("      {}", finding.detail.dimmed());
+        }
+    }
+
+    println!();
+    println!(
+        "{}",
+        "Tip: run `macroscope tui` for the interactive dashboard, or `macroscope scan --markdown report.md` for a shareable report."
+            .dimmed()
+    );
+}
+
+fn print_explanation(target: &str, report: &Report, plan: &ActionPlan) {
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Explain".bright_cyan().bold()
+    );
+    println!("{} {}", "Target:".bold(), target);
+    println!();
+
+    if let Some(action) = plan.actions.iter().find(|action| action.id == target) {
+        println!("{}", "Matched action".bold());
+        print_action_detail(action);
+        return;
+    }
+
+    let target_path = Path::new(target);
+    if target_path.is_absolute() {
+        explain_path_target(target_path, report, plan);
+        return;
+    }
+
+    if let Some(paths) = report.apps.duplicate_bundle_ids.get(target) {
+        println!("{}", "Matched duplicate bundle identifier".bold());
+        println!("  Bundle ID: `{target}`");
+        for path in paths {
+            println!("  - {}", path.display());
+        }
+        print_related_actions(target, plan);
+        return;
+    }
+
+    let matched_findings: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .title
+                .to_lowercase()
+                .contains(&target.to_lowercase())
+                || finding
+                    .detail
+                    .to_lowercase()
+                    .contains(&target.to_lowercase())
+        })
+        .collect();
+
+    if !matched_findings.is_empty() {
+        println!("{}", "Matched findings".bold());
+        for finding in matched_findings {
+            println!(
+                "  {} {}",
+                severity_badge(&finding.severity),
+                finding.title.bold()
+            );
+            println!("      {}", finding.detail.dimmed());
+        }
+        println!();
+        print_related_actions(target, plan);
+        return;
+    }
+
+    println!("{}", "No exact match found.".yellow().bold());
+    println!(
+        "{}",
+        "Try a full path, action ID from `macroscope plan`, app bundle ID, or text from a finding."
+            .dimmed()
+    );
+}
+
+fn explain_path_target(path: &Path, report: &Report, plan: &ActionPlan) {
+    if let Some(bin) = report.local_bins.iter().find(|bin| bin.path == path) {
+        println!("{}", "Matched /usr/local/bin entry".bold());
+        println!("  Path: {}", bin.path.display());
+        println!("  Kind: {}", bin.kind);
+        println!(
+            "  Architecture: {}",
+            bin.arch.as_deref().unwrap_or("unknown")
+        );
+        if let Some(target) = &bin.target {
+            println!("  Symlink target: {}", target.display());
+        }
+        println!();
+        print_related_actions(&path.display().to_string(), plan);
+        return;
+    }
+
+    if let Some(app) = report.apps.apps.iter().find(|app| app.path == path) {
+        println!("{}", "Matched application".bold());
+        println!("  Path: {}", app.path.display());
+        println!("  Name: {}", app.name.as_deref().unwrap_or("unknown"));
+        println!(
+            "  Bundle ID: {}",
+            app.bundle_id.as_deref().unwrap_or("unknown")
+        );
+        println!("  Version: {}", app.version.as_deref().unwrap_or("unknown"));
+        println!(
+            "  Executable arch: {}",
+            app.executable_arch.as_deref().unwrap_or("unknown")
+        );
+        println!();
+        print_related_actions(&path.display().to_string(), plan);
+        return;
+    }
+
+    println!(
+        "{}",
+        "Path was not part of the current scan.".yellow().bold()
+    );
+    println!("  {}", path.display());
+    print_related_actions(&path.display().to_string(), plan);
+}
+
+fn print_related_actions(target: &str, plan: &ActionPlan) {
+    let actions = related_actions(target, plan);
+    if actions.is_empty() {
+        println!("{}", "No related planned actions.".dimmed());
+        return;
+    }
+
+    println!("{}", "Related planned actions".bold());
+    for action in actions {
+        print_action_detail(action);
+    }
+}
+
+fn related_actions<'a>(target: &str, plan: &'a ActionPlan) -> Vec<&'a PlannedAction> {
+    if target.starts_with('/') {
+        let target_path = Path::new(target);
+        let quoted = format!("`{target}`").to_lowercase();
+        return plan
+            .actions
+            .iter()
+            .filter(|action| match &action.kind {
+                ActionKind::MoveToTrash { path } => path == target_path,
+                _ => {
+                    action.rationale.to_lowercase().contains(&quoted)
+                        || action_instruction(action).to_lowercase().contains(&quoted)
+                }
+            })
+            .collect();
+    }
+
+    let target = target.to_lowercase();
+    plan.actions
+        .iter()
+        .filter(|action| {
+            action.id.to_lowercase().contains(&target)
+                || action.title.to_lowercase().contains(&target)
+                || action.rationale.to_lowercase().contains(&target)
+                || action_instruction(action).to_lowercase().contains(&target)
+        })
+        .collect()
+}
+
+fn related_actions_for_finding<'a>(
+    finding: &Finding,
+    plan: &'a ActionPlan,
+) -> Vec<&'a PlannedAction> {
+    plan.actions
+        .iter()
+        .filter(|action| {
+            finding.detail.contains(&action_subject(action))
+                || action.rationale.contains(&finding.detail)
+                || action.title.contains(&finding.title)
+        })
+        .collect()
+}
+
+fn action_subject(action: &PlannedAction) -> String {
+    match &action.kind {
+        ActionKind::MoveToTrash { path } => path.display().to_string(),
+        ActionKind::BrewInstall { package } => package.clone(),
+        ActionKind::Manual { instructions } => instructions.clone(),
+    }
+}
+
+fn print_action_detail(action: &PlannedAction) {
+    println!(
+        "  {} {} {}",
+        risk_badge(action.risk),
+        confidence_badge(action.confidence),
+        action.title.bold()
+    );
+    println!("      ID: {}", action.id.dimmed());
+    println!("      {}", action.rationale.dimmed());
+    println!("      {} {}", "Action:".bold(), action_instruction(action));
+    if action.destructive {
+        println!(
+            "      {}",
+            "Destructive action: dry-run/review first.".red().bold()
+        );
+    }
+    println!();
+}
+
+fn load_or_generate_plan(path: Option<&Path>) -> Result<ActionPlan> {
+    if let Some(path) = path {
+        let json = fs::read_to_string(path)
+            .with_context(|| format!("failed to read action plan {}", path.display()))?;
+        let plan = serde_json::from_str(&json)
+            .with_context(|| format!("failed to parse action plan JSON {}", path.display()))?;
+        Ok(plan)
+    } else {
+        let report = scan();
+        Ok(generate_action_plan(&report))
+    }
+}
+
+fn dry_run_action_plan(plan: &ActionPlan) {
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Apply Dry Run".bright_cyan().bold()
+    );
+    println!("{}", "No changes will be made.".dimmed());
+    println!();
+
+    if plan.actions.is_empty() {
+        println!("{}", "No actions to dry-run.".green());
+        return;
+    }
+
+    for action in &plan.actions {
+        println!("{} {}", "Would run:".bold(), action.title.bold());
+        println!("  ID: {}", action.id);
+        println!(
+            "  Risk: {:?} | Confidence: {:?} | Destructive: {}",
+            action.risk, action.confidence, action.destructive
+        );
+        match &action.kind {
+            ActionKind::MoveToTrash { path } => {
+                println!("  Would move to Trash: {}", path.display());
+            }
+            ActionKind::BrewInstall { package } => {
+                println!("  Would execute: brew install {package}");
+            }
+            ActionKind::Manual { instructions } => {
+                println!("  Manual instruction: {instructions}");
+            }
+        }
+        println!();
+    }
+}
+
+fn run_tui(report: &Report, plan: &ActionPlan) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = tui_loop(&mut terminal, report, plan);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+fn tui_loop<B: Backend>(
+    terminal: &mut Terminal<B>,
+    report: &Report,
+    plan: &ActionPlan,
+) -> Result<()> {
+    let mut selected = if report.findings.is_empty() {
+        None
+    } else {
+        Some(0)
+    };
+
+    loop {
+        terminal.draw(|frame| {
+            let root = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(9),
+                    Constraint::Min(8),
+                    Constraint::Length(3),
+                ])
+                .split(frame.area());
+
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "◉ ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Macroscope",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "local-first macOS developer environment audit",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+            frame.render_widget(title, root[0]);
+
+            let overview_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(root[1]);
+
+            let intel_bins = intel_bin_count(report);
+            let intel_apps = intel_app_count(report);
+            let (risks, warns, infos) = finding_counts(report);
+
+            let overview = Paragraph::new(vec![
+                Line::from(vec![Span::styled(
+                    format!("macOS {} ({})", report.system.macos, report.system.arch),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!("Homebrew: {}", opt(&report.homebrew.prefix))),
+                Line::from(format!(
+                    "Packages: {} formulae · {} casks · {} leaves",
+                    report.homebrew.formulae.len(),
+                    report.homebrew.casks.len(),
+                    report.homebrew.leaves.len()
+                )),
+                Line::from(format!(
+                    "Apps: {} scanned · {} Intel-only · {} duplicate IDs",
+                    report.apps.apps.len(),
+                    intel_apps,
+                    report.apps.duplicate_bundle_ids.len()
+                )),
+                Line::from(format!(
+                    "/usr/local/bin: {} entries · {} Intel-only",
+                    report.local_bins.len(),
+                    intel_bins
+                )),
+                Line::from(format!(
+                    "Plan: {} actions · {} destructive",
+                    plan.summary.total, plan.summary.destructive
+                )),
+            ])
+            .block(Block::default().title("Overview").borders(Borders::ALL));
+            frame.render_widget(overview, overview_chunks[0]);
+
+            let tools = Paragraph::new(vec![
+                Line::from(format!("node: {}", tool_line(&report.dev_tools.node))),
+                Line::from(format!("npm: {}", tool_line(&report.dev_tools.npm.npm))),
+                Line::from(format!(
+                    "npm globals: {}",
+                    report.dev_tools.npm.global_packages.len()
+                )),
+                Line::from(format!(
+                    "cargo installs: {}",
+                    report.dev_tools.cargo.installed.len()
+                )),
+                Line::from(format!("python3: {}", tool_line(&report.dev_tools.python))),
+            ])
+            .block(
+                Block::default()
+                    .title("Developer tools")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true });
+            frame.render_widget(tools, overview_chunks[1]);
+
+            let findings_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(root[2]);
+
+            let items: Vec<ListItem> = if report.findings.is_empty() {
+                vec![ListItem::new(Line::from(vec![Span::styled(
+                    "No notable findings. Nice.",
+                    Style::default().fg(Color::Green),
+                )]))]
+            } else {
+                report
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!("{:<4} ", severity_label(&finding.severity)),
+                                tui_severity_style(&finding.severity),
+                            ),
+                            Span::raw(finding.title.clone()),
+                        ]))
+                    })
+                    .collect()
+            };
+
+            let mut state = ListState::default();
+            state.select(selected);
+            let findings = List::new(items)
+                .block(
+                    Block::default()
+                        .title(format!(
+                            "Findings  {risks} risk · {warns} warn · {infos} info"
+                        ))
+                        .borders(Borders::ALL),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("➜ ");
+            frame.render_stateful_widget(findings, findings_chunks[0], &mut state);
+
+            let detail_lines =
+                if let Some(idx) = selected.and_then(|idx| report.findings.get(idx).map(|_| idx)) {
+                    let finding = &report.findings[idx];
+                    let mut lines = vec![
+                        Line::from(vec![
+                            Span::styled(
+                                severity_label(&finding.severity),
+                                tui_severity_style(&finding.severity),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                finding.title.clone(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(""),
+                        Line::from(finding.detail.clone()),
+                        Line::from(""),
+                    ];
+
+                    let related = related_actions_for_finding(finding, plan);
+                    if !related.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "Related actions:",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )));
+                        for action in related.into_iter().take(3) {
+                            lines.push(Line::from(format!("- {}", action.title)));
+                        }
+                        lines.push(Line::from(""));
+                    }
+
+                    lines.push(Line::from(Span::styled(
+                        format!("Finding {} of {}", idx + 1, report.findings.len()),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    lines
+                } else {
+                    vec![Line::from("No finding selected.")]
+                };
+
+            let detail = Paragraph::new(detail_lines)
+                .block(Block::default().title("Detail").borders(Borders::ALL))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(detail, findings_chunks[1]);
+
+            let footer = Paragraph::new(Line::from(vec![
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" select  ·  "),
+                Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move  ·  "),
+                Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("/"),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" quit  ·  "),
+                Span::raw("scan --markdown report.md writes a reviewable report"),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+            frame.render_widget(footer, root[3]);
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = next_finding(selected, report.findings.len())
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = previous_finding(selected, report.findings.len())
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn next_finding(selected: Option<usize>, len: usize) -> Option<usize> {
+    if len == 0 {
+        None
+    } else {
+        Some(selected.map_or(0, |idx| (idx + 1).min(len - 1)))
+    }
+}
+
+fn previous_finding(selected: Option<usize>, len: usize) -> Option<usize> {
+    if len == 0 {
+        None
+    } else {
+        Some(selected.map_or(0, |idx| idx.saturating_sub(1)))
+    }
+}
+
+fn intel_bin_count(report: &Report) -> usize {
+    report
+        .local_bins
+        .iter()
+        .filter(|bin| {
+            bin.arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .count()
+}
+
+fn intel_app_count(report: &Report) -> usize {
+    report
+        .apps
+        .apps
+        .iter()
+        .filter(|app| {
+            app.executable_arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .count()
+}
+
+fn finding_counts(report: &Report) -> (usize, usize, usize) {
+    let mut risks = 0;
+    let mut warns = 0;
+    let mut infos = 0;
+
+    for finding in &report.findings {
+        match finding.severity {
+            Severity::Risk => risks += 1,
+            Severity::Warn => warns += 1,
+            Severity::Info => infos += 1,
+        }
+    }
+
+    (risks, warns, infos)
+}
+
+fn severity_label(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Risk => "RISK",
+        Severity::Warn => "WARN",
+        Severity::Info => "INFO",
+    }
+}
+
+fn severity_badge(severity: &Severity) -> String {
+    match severity {
+        Severity::Risk => "RISK".red().bold().to_string(),
+        Severity::Warn => "WARN".yellow().bold().to_string(),
+        Severity::Info => "INFO".blue().bold().to_string(),
+    }
+}
+
+fn tui_severity_style(severity: &Severity) -> Style {
+    match severity {
+        Severity::Risk => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Severity::Warn => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        Severity::Info => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn plist_string(plist: &Option<Value>, key: &str) -> Option<String> {
+    plist
+        .as_ref()?
+        .as_dictionary()?
+        .get(key)?
+        .as_string()
+        .map(String::from)
+}
+
+fn command_stdout(cmd: &str, args: &[&str]) -> Result<String> {
+    command_stdout_path(Path::new(cmd), args)
+}
+
+fn command_stdout_path(cmd: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new(cmd).args(args).output()?;
+    if !output.status.success() {
+        anyhow::bail!("command failed: {} {}", cmd.display(), args.join(" "));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn command_lines_path(cmd: &Path, args: &[&str]) -> Result<Vec<String>> {
+    Ok(command_stdout_path(cmd, args)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+fn file_arch(path: &Path) -> Result<String> {
+    let output = Command::new("file").arg("-b").arg(path).output()?;
+    if !output.status.success() {
+        anyhow::bail!("file failed for {}", path.display());
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(simplify_file_arch(&text))
+}
+
+fn simplify_file_arch(file_output: &str) -> String {
+    let mut parts = Vec::new();
+    if file_output.contains("arm64") {
+        parts.push("arm64");
+    }
+    if file_output.contains("x86_64") {
+        parts.push("x86_64");
+    }
+    if file_output.contains("Mach-O") {
+        parts.push("Mach-O");
+    } else if file_output.contains("script") || file_output.starts_with("#!") {
+        parts.push("script");
+    } else if file_output.contains("ASCII text") || file_output.contains("Unicode text") {
+        parts.push("text");
+    }
+
+    if parts.is_empty() {
+        file_output.to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn find_homebrew() -> Option<PathBuf> {
+    ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+}
+
+fn which(cmd: &str) -> Option<PathBuf> {
+    if cmd.contains('/') {
+        let path = PathBuf::from(cmd);
+        return path.exists().then_some(path);
+    }
+
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn first_field(line: &str) -> &str {
+    line.split_whitespace().next().unwrap_or(line)
+}
+
+fn opt(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("not found")
+}
+
+fn tool_line(tool: &ToolVersion) -> String {
+    match (&tool.path, &tool.version) {
+        (Some(path), Some(version)) => format!("{version} ({path})"),
+        (Some(path), None) => format!("found ({path})"),
+        _ => "not found".into(),
+    }
+}
+
+fn push_bullets(out: &mut String, values: &[String]) {
+    if values.is_empty() {
+        out.push_str("None.\n\n");
+    } else {
+        for value in values {
+            out.push_str(&format!("- `{value}`\n"));
+        }
+        out.push('\n');
+    }
+}
+
+fn push_tool_md(out: &mut String, name: &str, tool: &ToolVersion) {
+    out.push_str(&format!("- `{name}`: {}\n", tool_line(tool)));
+}
