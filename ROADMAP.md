@@ -38,7 +38,8 @@ Planned:
 - More precise app architecture detection
 - Modified/opened dates where available
 - Quarantine and code-signing status
-- Package-manager ownership detection
+- [x] Initial `/usr/local/bin` ownership detection
+- Deeper package-manager ownership detection
 
 ### `macroscope tui`
 

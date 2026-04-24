@@ -28,7 +28,7 @@ The initial scanner audits:
 - Duplicate macOS app bundle identifiers
 - App versions, bundle IDs, paths, and executable architecture
 - Intel-only apps on Apple Silicon
-- `/usr/local/bin` standalone binaries and symlinks
+- `/usr/local/bin` standalone binaries and symlinks, with ownership heuristics
 - `PATH` ordering and duplicate entries
 - Node/npm versions and global npm packages
 - Cargo-installed crates

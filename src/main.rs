@@ -135,6 +135,7 @@ struct BinEntry {
     kind: String,
     arch: Option<String>,
     target: Option<PathBuf>,
+    owner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -467,17 +468,79 @@ fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
         }
         .to_string();
         let arch = file_arch(&path).ok();
+        let owner = infer_bin_owner(&path, target.as_ref());
 
         bins.push(BinEntry {
             path,
             kind,
             arch,
             target,
+            owner,
         });
     }
 
     bins.sort_by(|a, b| a.path.cmp(&b.path));
     bins
+}
+
+fn infer_bin_owner(path: &Path, target: Option<&PathBuf>) -> Option<String> {
+    let resolved_target = target.map(|target| {
+        if target.is_absolute() {
+            target.clone()
+        } else {
+            path.parent().unwrap_or_else(|| Path::new("/")).join(target)
+        }
+    });
+    let subject = resolved_target
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let text = subject.display().to_string();
+
+    if target.is_some() && fs::symlink_metadata(&subject).is_err() {
+        return Some("broken symlink".into());
+    }
+
+    if text.starts_with("/Applications/") {
+        return Some(format!("app bundle ({})", app_name_from_path(&subject)));
+    }
+    if text.starts_with("/opt/homebrew/") {
+        return Some("Homebrew (/opt/homebrew)".into());
+    }
+    if text.starts_with("/usr/local/Cellar/") || text.starts_with("/usr/local/Homebrew/") {
+        return Some("legacy Homebrew (/usr/local)".into());
+    }
+    if text.starts_with("/usr/local/Caskroom/") {
+        return Some("legacy Homebrew cask (/usr/local/Caskroom)".into());
+    }
+    if text.starts_with("/usr/local/aws-cli/") {
+        return Some("AWS CLI manual installer".into());
+    }
+    if text.contains("/.cargo/bin") {
+        return Some("Cargo".into());
+    }
+    if text.contains("/.nvm/") {
+        return Some("nvm/npm".into());
+    }
+    if text.contains("/node_modules/") || text.starts_with("/usr/local/lib/node_modules/") {
+        return Some("Node/npm (/usr/local)".into());
+    }
+    if path.starts_with("/usr/local/bin") {
+        return Some("standalone/manual /usr/local/bin".into());
+    }
+
+    None
+}
+
+fn app_name_from_path(path: &Path) -> String {
+    for ancestor in path.ancestors() {
+        if ancestor.extension() == Some(OsStr::new("app")) {
+            return ancestor
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ancestor.display().to_string());
+        }
+    }
+    "unknown app".into()
 }
 
 fn scan_path() -> PathReport {
@@ -628,9 +691,10 @@ fn build_findings(
                     severity: Severity::Risk,
                     title: "Intel-only binary in /usr/local/bin".into(),
                     detail: format!(
-                        "{} appears to be {}",
+                        "{} appears to be {} (owner: {})",
                         bin.path.display(),
-                        bin.arch.as_deref().unwrap_or("unknown")
+                        bin.arch.as_deref().unwrap_or("unknown"),
+                        bin.owner.as_deref().unwrap_or("unknown/manual")
                     ),
                 });
             }
@@ -754,24 +818,45 @@ fn generate_action_plan(report: &Report) -> ActionPlan {
             }
         }
 
-        actions.push(PlannedAction {
-            id: format!("trash-{}", slugify(&bin.path.display().to_string())),
-            title: format!("Move stale Intel binary `{name}` to Trash"),
-            rationale: format!(
-                "`{}` is an Intel-only binary in `/usr/local/bin`. On Apple Silicon this is likely a legacy/manual install. Move to Trash only after confirming it is unused or replaced.",
-                bin.path.display()
-            ),
-            confidence: if known_brew_replacement(&name).is_some() {
-                Confidence::Medium
-            } else {
-                Confidence::Low
-            },
-            risk: ActionRisk::Medium,
-            destructive: true,
-            kind: ActionKind::MoveToTrash {
-                path: bin.path.clone(),
-            },
-        });
+        let owner = bin.owner.as_deref().unwrap_or("unknown/manual");
+        if requires_owner_aware_manual_removal(owner) {
+            actions.push(PlannedAction {
+                id: format!("review-owner-{}", slugify(&bin.path.display().to_string())),
+                title: format!("Review owner-managed Intel binary `{name}`"),
+                rationale: format!(
+                    "`{}` is Intel-only, but appears to be owned by {owner}. Prefer updating/removing it through that owner instead of deleting the file directly.",
+                    bin.path.display()
+                ),
+                confidence: Confidence::Medium,
+                risk: ActionRisk::Medium,
+                destructive: false,
+                kind: ActionKind::Manual {
+                    instructions: format!(
+                        "Inspect `{}` and its owner ({owner}). Update, reinstall, unlink, or uninstall through the owning app/package manager before removing any file.",
+                        bin.path.display()
+                    ),
+                },
+            });
+        } else {
+            actions.push(PlannedAction {
+                id: format!("trash-{}", slugify(&bin.path.display().to_string())),
+                title: format!("Move stale Intel binary `{name}` to Trash"),
+                rationale: format!(
+                    "`{}` is an Intel-only binary in `/usr/local/bin` and appears to be owned by {owner}. Move to Trash only after confirming it is unused or replaced.",
+                    bin.path.display()
+                ),
+                confidence: if known_brew_replacement(&name).is_some() {
+                    Confidence::Medium
+                } else {
+                    Confidence::Low
+                },
+                risk: ActionRisk::Medium,
+                destructive: true,
+                kind: ActionKind::MoveToTrash {
+                    path: bin.path.clone(),
+                },
+            });
+        }
     }
 
     for (bundle_id, paths) in &report.apps.duplicate_bundle_ids {
@@ -857,6 +942,15 @@ fn summarize_actions(actions: &[PlannedAction]) -> ActionPlanSummary {
     }
 
     summary
+}
+
+fn requires_owner_aware_manual_removal(owner: &str) -> bool {
+    owner.starts_with("Homebrew")
+        || owner.starts_with("legacy Homebrew")
+        || owner.starts_with("Node/npm")
+        || owner.starts_with("nvm/npm")
+        || owner.starts_with("Cargo")
+        || owner.starts_with("app bundle")
 }
 
 fn known_brew_replacement(binary_name: &str) -> Option<&'static str> {
@@ -1073,6 +1167,9 @@ fn render_markdown(report: &Report) -> String {
             }
             if let Some(target) = &bin.target {
                 out.push_str(&format!(", -> `{}`", target.display()));
+            }
+            if let Some(owner) = &bin.owner {
+                out.push_str(&format!(", owner: `{}`", md_escape(owner)));
             }
             out.push('\n');
         }
@@ -1378,6 +1475,10 @@ fn explain_path_target(path: &Path, report: &Report, plan: &ActionPlan) {
         println!("{}", "Matched /usr/local/bin entry".bold());
         println!("  Path: {}", bin.path.display());
         println!("  Kind: {}", bin.kind);
+        println!(
+            "  Owner: {}",
+            bin.owner.as_deref().unwrap_or("unknown/manual")
+        );
         println!(
             "  Architecture: {}",
             bin.arch.as_deref().unwrap_or("unknown")
