@@ -34,6 +34,7 @@ Current: pretty read-only audit.
 Planned:
 
 - Better categories and finding IDs
+- [x] App versions, architectures, bundle IDs, and paths in reports
 - More precise app architecture detection
 - Modified/opened dates where available
 - Quarantine and code-signing status

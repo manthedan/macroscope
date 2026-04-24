@@ -1050,6 +1050,7 @@ fn render_markdown(report: &Report) -> String {
 
     out.push_str("## Applications\n\n");
     out.push_str(&format!("Scanned {} apps.\n\n", report.apps.apps.len()));
+    push_app_table_md(&mut out, &report.apps.apps);
     if !report.apps.duplicate_bundle_ids.is_empty() {
         out.push_str("### Duplicate Bundle IDs\n\n");
         for (bundle_id, paths) in &report.apps.duplicate_bundle_ids {
@@ -1177,6 +1178,8 @@ fn print_summary(report: &Report) {
     ]);
     println!("{overview}");
 
+    print_app_report(report);
+
     println!("{}", "Developer tools".bold());
     let mut tools = Table::new();
     tools
@@ -1237,6 +1240,68 @@ fn print_summary(report: &Report) {
         "Tip: run `macroscope tui` for the interactive dashboard, or `macroscope scan --markdown report.md` for a shareable report."
             .dimmed()
     );
+}
+
+fn print_app_report(report: &Report) {
+    let intel_apps: Vec<&AppEntry> = report
+        .apps
+        .apps
+        .iter()
+        .filter(|app| {
+            app.executable_arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .collect();
+
+    if intel_apps.is_empty() && report.apps.duplicate_bundle_ids.is_empty() {
+        return;
+    }
+
+    println!("{}", "Applications".bold());
+
+    if !intel_apps.is_empty() {
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL).set_header(vec![
+            Cell::new("App"),
+            Cell::new("Version"),
+            Cell::new("Arch"),
+            Cell::new("Bundle ID"),
+            Cell::new("Path"),
+        ]);
+        for app in intel_apps.into_iter().take(12) {
+            table.add_row(vec![
+                Cell::new(app.name.as_deref().unwrap_or("unknown")),
+                Cell::new(app.version.as_deref().unwrap_or("unknown")),
+                Cell::new(app.executable_arch.as_deref().unwrap_or("unknown")),
+                Cell::new(app.bundle_id.as_deref().unwrap_or("unknown")),
+                Cell::new(app.path.display()),
+            ]);
+        }
+        println!("{}", "Intel-only app executables".yellow().bold());
+        println!("{table}");
+    }
+
+    if !report.apps.duplicate_bundle_ids.is_empty() {
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_header(vec![Cell::new("Bundle ID"), Cell::new("Paths")]);
+        for (bundle_id, paths) in &report.apps.duplicate_bundle_ids {
+            table.add_row(vec![
+                Cell::new(bundle_id),
+                Cell::new(
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            ]);
+        }
+        println!("{}", "Duplicate bundle identifiers".yellow().bold());
+        println!("{table}");
+    }
 }
 
 fn print_explanation(target: &str, report: &Report, plan: &ActionPlan) {
@@ -2250,6 +2315,31 @@ fn tool_line(tool: &ToolVersion) -> String {
         (Some(path), None) => format!("found ({path})"),
         _ => "not found".into(),
     }
+}
+
+fn push_app_table_md(out: &mut String, apps: &[AppEntry]) {
+    if apps.is_empty() {
+        out.push_str("No apps found.\n\n");
+        return;
+    }
+
+    out.push_str("| App | Version | Architecture | Bundle ID | Path |\n");
+    out.push_str("| --- | --- | --- | --- | --- |\n");
+    for app in apps {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | `{}` |\n",
+            md_escape(app.name.as_deref().unwrap_or("unknown")),
+            md_escape(app.version.as_deref().unwrap_or("unknown")),
+            md_escape(app.executable_arch.as_deref().unwrap_or("unknown")),
+            md_escape(app.bundle_id.as_deref().unwrap_or("unknown")),
+            md_escape(&app.path.display().to_string())
+        ));
+    }
+    out.push('\n');
+}
+
+fn md_escape(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 fn push_bullets(out: &mut String, values: &[String]) {

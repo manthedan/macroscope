@@ -26,7 +26,8 @@ The initial scanner audits:
 - Homebrew formulae, casks, and leaves
 - `/Applications` and `~/Applications`
 - Duplicate macOS app bundle identifiers
-- App executable architecture, especially Intel-only apps on Apple Silicon
+- App versions, bundle IDs, paths, and executable architecture
+- Intel-only apps on Apple Silicon
 - `/usr/local/bin` standalone binaries and symlinks
 - `PATH` ordering and duplicate entries
 - Node/npm versions and global npm packages
