@@ -16,9 +16,24 @@ cargo run -- explain /usr/local/bin/aws
 cargo run -- apply --dry-run
 cargo run -- apply --yes plan.json
 cargo run -- tui
+cargo run -- tui --apply
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. `tui` opens an interactive terminal dashboard with Findings and Plan tabs. Press `Tab` to switch tabs, `↑/↓` or `j/k` to move, `f`/`p` to jump to Findings/Plan, and `q` or `Esc` to exit.
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. `tui` opens an interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
+
+TUI controls:
+
+```text
+Tab / f / p  switch Findings/Plan
+j/k or ↑/↓   move selection
+e            explain selected finding/action
+d / D        dry-run selected action / whole plan
+x / m        export plan JSON / Markdown
+r            rescan and regenerate plan
+a / A        apply selected / all executable actions in --apply mode only
+?            help
+q / Esc      close modal or quit
+```
 
 The initial scanner audits:
 
@@ -42,6 +57,7 @@ The initial scanner audits:
 - Dry-run ActionPlan executor
 - TUI ActionPlan context and related actions
 - TUI Plan tab with action detail browsing
+- TUI dry-run, export, explain, rescan, and guarded apply controls
 
 ## Why npm belongs here
 

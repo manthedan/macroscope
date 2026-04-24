@@ -46,15 +46,15 @@ Planned:
 
 ### `macroscope tui`
 
-Current: interactive dashboard with selectable Findings and Plan tabs, plan summary, related actions, and action detail browsing.
+Current: interactive dashboard with selectable Findings and Plan tabs, plan summary, related actions, action detail browsing, explain modals, dry-run previews, plan export, rescan, and guarded apply controls. Plain `macroscope tui` is read-only; `macroscope tui --apply` enables Move-to-Trash execution only after a dry-run and typed confirmation.
 
 Planned:
 
 - More tabs: Apps, Binaries, Packages
 - Search/filter by severity/category/path
-- Per-finding explanation pane
-- Suggested actions pane
-- Select actions for a future dry-run/apply flow
+- Multi-select action staging
+- Scrollable modal/history panes
+- Package-manager action execution after ownership metadata improves
 
 ### `macroscope plan`
 
@@ -107,6 +107,12 @@ macroscope apply --yes plan.json
 ```
 
 Package-manager and manual actions are printed for review rather than executed automatically.
+
+Interactive apply now exists in the TUI for executable Move-to-Trash actions:
+
+```bash
+macroscope tui --apply
+```
 
 Future:
 
@@ -209,3 +215,5 @@ enum ActionKind {
 - [x] Add dry-run executor
 - [x] Add safe Trash implementation
 - [x] Add Homebrew cleanup intelligence
+- [x] Add TUI explain/dry-run/export/rescan controls
+- [x] Add guarded TUI apply mode for Move-to-Trash actions
