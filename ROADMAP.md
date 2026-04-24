@@ -98,22 +98,37 @@ Planned:
 - [x] Go toolchain and GOPATH/bin binary architecture inventory
 - Deeper package-manager ownership detection
 
+### `macroscope guide`
+
+Planned: guided terminal workflow that walks a user through the whole cleanup session.
+
+```bash
+macroscope guide
+macroscope guide --apply
+```
+
+The guide should be the primary interactive experience:
+
+1. Scan the Mac with progress.
+2. Summarize risk/warn/info findings and proposed actions.
+3. Generate a plan.
+4. Help the user choose between safe apply, manual instructions, handoff brief, ignore/snooze, or needs-more-evidence.
+5. Apply only explicitly confirmed low-risk/reversible actions.
+6. Write a human/AI handoff brief.
+7. Optionally rescan to verify changes.
+
+This is more useful than a generic dashboard because it models the actual workflow: evidence → plan → decision → action/handoff → verification.
+
 ### `macroscope tui`
 
 Current: interactive dashboard with scan/rescan progress animation, selectable Findings and Plan tabs, plan summary, related actions, action detail browsing, explain modals, dry-run previews, plan export, rescan, and guarded apply controls. Plain `macroscope tui` is read-only; `macroscope tui --apply` enables Move-to-Trash execution only after a dry-run and typed confirmation.
 
-Planned:
+Positioning:
 
-- More tabs: Apps, Binaries, Packages
-- Search/filter by severity/category/path
-- Multi-select action staging
-- Scrollable modal/history panes
-- Track per-action status in the TUI: pending, dry-run, applied, skipped, failed
-- Remove or mark applied actions immediately after successful TUI apply so a rescan is not required for feedback
-- Better apply result summaries, including counts for applied/skipped/failed actions
-- Let `a` on the Findings tab apply related executable actions using the same guarded flow as Plan actions
-- Treat `Enter` as a natural open/explain action for the selected item
-- Package-manager action execution after ownership metadata improves
+- Keep the dashboard as optional browsing UI.
+- Do not prioritize a large TUI refactor just for cleanliness.
+- Invest interactive effort in `macroscope guide` unless the dashboard blocks real use.
+- Add dashboard fixes opportunistically, not as a near-term product priority.
 
 ### `macroscope plan`
 
@@ -286,40 +301,35 @@ enum ActionKind {
 
 ## Next priorities
 
-1. **Polish TUI apply state**
-   - Track dry-run/applied/failed/skipped status per action.
-   - Update or remove successfully applied actions in-memory.
-   - Improve apply result modals and summaries.
-   - Add scroll support for long dry-run/apply/explain modals.
-   - Extend Findings-tab apply to related executable actions.
-
-2. **Split the TUI module**
-   - `src/tui.rs` is now isolated but still large.
-   - Split into `tui/mod.rs`, `tui/state.rs`, `tui/render.rs`, `tui/input.rs`, and `tui/progress.rs` before adding much more TUI complexity.
-
-3. **Add an AI/human handoff brief**
+1. **Add an AI/human handoff brief**
    - Add `macroscope brief` as a first-class command.
    - Produce a compact Markdown document suitable for Codex, Claude Code, or a human reviewer.
    - Separate high-confidence evidence from ambiguous ecosystem-specific findings.
    - Include “do not automate” warnings and questions to ask before cleanup.
 
-4. **Improve ecosystem intelligence only where it makes findings more actionable**
+2. **Add a guided cleanup workflow**
+   - Add `macroscope guide` as the primary interactive flow.
+   - Walk through scan → plan → review → safe apply/manual/handoff → optional verification.
+   - Keep mutation behind `--apply`, dry-run, and explicit typed confirmation.
+   - Treat the existing dashboard TUI as optional browsing UI, not the core workflow.
+
+3. **Improve ecosystem intelligence only where it makes findings more actionable**
    - Keep Go/Conda/JVM/etc. support shallow unless real evidence or user demand justifies deeper work.
    - Prefer known rebuild/export/review commands over custom ecosystem managers.
    - Group unknown/project-specific tools separately instead of pretending to understand them.
    - Move ambiguous cleanup into the handoff brief rather than risky automated actions.
 
-5. **Add cautious Homebrew execution paths**
+4. **Add cautious Homebrew execution paths**
    - Start with clearer/copyable package-manager commands in the TUI.
    - Later add explicit action kinds for `brew cleanup`, `brew autoremove`, and `brew install`.
    - Keep real execution gated by dry-run, plan review, typed confirmation, and ownership confidence.
 
-6. **Add TUI search/filter**
-   - `/` search across findings/actions.
-   - Severity/category/path filters.
-   - `g`/`G` jump to top/bottom.
+5. **Improve finding structure and report evidence**
+   - Add stable finding IDs/categories/confidence/evidence over time.
+   - Improve ownership, modified date, size, quarantine, and signing evidence where practical.
+   - Make scan/plan/brief output better before adding broad ecosystem-specific logic.
 
-7. **Deepen app cleanup intelligence**
+6. **Deepen app cleanup intelligence**
    - Include app size, last opened/modified dates, quarantine status, signing status, and cask ownership.
    - Improve duplicate app handling.
    - Keep app deletion as Trash-backed and explicitly confirmed.
