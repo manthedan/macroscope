@@ -1,5 +1,18 @@
 # Macroscope
 
+```text
+        .-""""-.          MACROSCOPE
+     .-'  MAC   '-.       local-first macOS dev audit
+    /   .------.   \
+   |   /  scan  \   |     scan  -> explain -> plan -> dry-run
+    \  \________/  /
+     '-.        .-'
+        '------'
+           ||
+        ___||___
+       /________\
+```
+
 Macroscope is a local-first macOS developer environment auditor written in Rust.
 
 The goal is to answer: **what is installed on this Mac, where did it come from, is it native, and what is probably stale?**
