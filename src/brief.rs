@@ -139,21 +139,24 @@ fn push_ambiguous_findings(out: &mut String, report: &Report, plan: &ActionPlan)
 }
 
 fn push_suggested_next_commands(out: &mut String, plan: &ActionPlan) {
-    out.push_str("## Suggested next commands\n\n");
-    out.push_str("Review without mutating:\n\n");
+    out.push_str("## Follow-up commands\n\n");
+    out.push_str("These commands are for verification or for regenerating artifacts after manual changes. They are not required just to read this brief.\n\n");
+    out.push_str("After taking manual/package-manager actions, rescan and regenerate the review artifacts:\n\n");
     out.push_str("```bash\n");
     out.push_str("macroscope scan --markdown macroscope-report.md\n");
     out.push_str("macroscope plan --markdown macroscope-plan.md\n");
-    out.push_str("macroscope apply --dry-run\n");
+    out.push_str("macroscope brief --markdown macroscope-brief.md --for-llm\n");
     out.push_str("```\n\n");
+    out.push_str("Before any Macroscope-managed cleanup, preview the current plan again:\n\n");
+    out.push_str("```bash\nmacroscope apply --dry-run\n```\n\n");
 
     let executable = executable_action_count(plan);
     if executable > 0 {
         out.push_str(&format!(
-            "Macroscope can execute {executable} currently supported action(s), all `move-to-trash`, but only after explicit confirmation:\n\n"
+            "Macroscope can execute {executable} currently supported action(s), all `move-to-trash`, but only from an explicit reviewed plan and after confirmation:\n\n"
         ));
         out.push_str(
-            "```bash\nmacroscope apply --dry-run\nmacroscope apply --yes plan.json\n```\n\n",
+            "```bash\nmacroscope plan --json > plan.json\nmacroscope apply --dry-run plan.json\nmacroscope apply --yes plan.json\n```\n\n",
         );
     }
 
