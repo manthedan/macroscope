@@ -27,7 +27,7 @@ TUI controls:
 Tab / f / p  switch Findings/Plan
 j/k or ↑/↓   move selection
 e            explain selected finding/action
-d / D        dry-run selected action / whole plan
+d / D        dry-run selected action, or related finding actions / whole plan
 x / m        export plan JSON / Markdown
 r            rescan and regenerate plan
 a / A        apply selected / all executable actions in --apply mode only

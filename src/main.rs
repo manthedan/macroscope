@@ -2696,19 +2696,47 @@ fn tui_loop<B: Backend>(
                             ),
                         });
                     }
-                    KeyCode::Char('d') => {
-                        if let Some(action) = selected_action.and_then(|idx| plan.actions.get(idx))
-                        {
-                            dry_run_actions.insert(action.id.clone());
+                    KeyCode::Char('d') => match active_tab {
+                        TuiTab::Findings => {
+                            let Some(finding) =
+                                selected_finding.and_then(|idx| report.findings.get(idx))
+                            else {
+                                status = "No finding selected to dry-run.".into();
+                                continue;
+                            };
+                            let related = related_actions_for_finding(finding, &plan);
+                            if related.is_empty() {
+                                status = "Selected finding has no related plan actions to dry-run."
+                                    .into();
+                                continue;
+                            }
+                            for action in &related {
+                                dry_run_actions.insert(action.id.clone());
+                            }
+                            let count = related.len();
                             overlay = Some(TuiOverlay::Message {
-                                title: "Selected action dry run".into(),
-                                lines: dry_run_action_lines(action),
+                                title: "Related action dry run".into(),
+                                lines: dry_run_related_actions_lines(finding, &related),
                             });
-                            status = format!("Dry-run recorded for `{}`.", action.id);
-                        } else {
-                            status = "No plan action selected to dry-run.".into();
+                            status = format!(
+                                "Dry-run recorded for {count} action(s) related to the selected finding."
+                            );
                         }
-                    }
+                        TuiTab::Plan => {
+                            if let Some(action) =
+                                selected_action.and_then(|idx| plan.actions.get(idx))
+                            {
+                                dry_run_actions.insert(action.id.clone());
+                                overlay = Some(TuiOverlay::Message {
+                                    title: "Selected action dry run".into(),
+                                    lines: dry_run_action_lines(action),
+                                });
+                                status = format!("Dry-run recorded for `{}`.", action.id);
+                            } else {
+                                status = "No plan action selected to dry-run.".into();
+                            }
+                        }
+                    },
                     KeyCode::Char('D') => {
                         plan_dry_run_done = true;
                         overlay = Some(TuiOverlay::Message {
@@ -2827,7 +2855,7 @@ fn render_tui_overlay(frame: &mut ratatui::Frame<'_>, overlay: &TuiOverlay) {
                 "Tab / f / p: switch between Findings and Plan".into(),
                 "j/k or arrows: move selection".into(),
                 "e: explain selected finding or action".into(),
-                "d: dry-run selected plan action".into(),
+                "d: dry-run selected plan action, or related actions for a selected finding".into(),
                 "D: dry-run the whole generated plan".into(),
                 "x: export plan JSON to ./macroscope-plan.json".into(),
                 "m: export plan Markdown to ./macroscope-plan.md".into(),
@@ -2966,6 +2994,28 @@ fn dry_run_action_lines(action: &PlannedAction) -> Vec<String> {
             lines.push("Manual actions are never auto-executed.".into());
         }
     }
+    lines
+}
+
+fn dry_run_related_actions_lines(finding: &Finding, actions: &[&PlannedAction]) -> Vec<String> {
+    let mut lines = vec![
+        format!("Finding: {}", finding.title),
+        finding.detail.clone(),
+        "".into(),
+        format!("Related actions to dry-run: {}", actions.len()),
+        "".into(),
+    ];
+
+    for action in actions {
+        let prefix = if is_executable_action(action) {
+            "Would run"
+        } else {
+            "Would skip/review"
+        };
+        lines.push(format!("{prefix}: {} ({})", action.title, action.id));
+        lines.push(format!("  {}", action_instruction(action)));
+    }
+
     lines
 }
 
