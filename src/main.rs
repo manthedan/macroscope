@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "macroscope")]
+#[command(version)]
 #[command(about = "Audit your macOS developer environment", long_about = None)]
 struct Cli {
     #[command(subcommand)]

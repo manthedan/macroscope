@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "A local-first macOS developer environment auditor"
 license = "MIT"
+repository = "https://github.com/manthedan/macroscope"
+readme = "README.md"
+keywords = ["macos", "homebrew", "audit", "developer-tools", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"

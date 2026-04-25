@@ -13,7 +13,7 @@ pub fn generate_action_plan(report: &Report) -> ActionPlan {
         let Some(arch) = &bin.arch else {
             continue;
         };
-        if !(arch.contains("x86_64") && !arch.contains("arm64")) {
+        if !arch.contains("x86_64") || arch.contains("arm64") {
             continue;
         }
 
@@ -23,9 +23,10 @@ pub fn generate_action_plan(report: &Report) -> ActionPlan {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".into());
 
-        if let Some(package) = known_brew_replacement(&name) {
-            if suggested_brew_packages.insert(package.to_string()) {
-                actions.push(PlannedAction {
+        if let Some(package) = known_brew_replacement(&name)
+            && suggested_brew_packages.insert(package.to_string())
+        {
+            actions.push(PlannedAction {
                 id: format!("brew-install-{}", slugify(package)),
                 title: format!("Install native ARM Homebrew replacement for `{name}`"),
                 rationale: format!(
@@ -35,11 +36,10 @@ pub fn generate_action_plan(report: &Report) -> ActionPlan {
                 confidence: Confidence::Medium,
                 risk: ActionRisk::Medium,
                 destructive: false,
-                    kind: ActionKind::BrewInstall {
-                        package: package.to_string(),
-                    },
-                });
-            }
+                kind: ActionKind::BrewInstall {
+                    package: package.to_string(),
+                },
+            });
         }
 
         let owner = bin.owner.as_deref().unwrap_or("unknown/manual");
