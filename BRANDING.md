@@ -2,7 +2,13 @@
 
 ## Current direction
 
-The text-logo/wordmark experiment was removed. For now, keep branding minimal and let the product interface do the work.
+Use a clean SVG lockup rather than terminal ASCII art. The lockup should feel like a polished local developer tool: Mac-native, evidence-oriented, and safe-by-default.
+
+Primary README lockup:
+
+```text
+assets/macroscope-lockup.svg
+```
 
 ## Tiny CLI mark
 

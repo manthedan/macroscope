@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/macroscope-lockup.svg" alt="Macroscope — developer environment archaeology for your Mac" width="860">
+</p>
+
 # Macroscope
 
 Macroscope is a local-first macOS developer-environment auditor written in Rust.
