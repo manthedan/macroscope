@@ -2,7 +2,7 @@ class Macroscope < Formula
   desc "Local-first macOS developer environment auditor"
   homepage "https://github.com/manthedan/macroscope"
   url "https://github.com/manthedan/macroscope/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "426231c7aa743a4245ef7f2d0629faf1c0405379ec12c824e04c7d875768cae6"
+  sha256 "fbdeffbc6229a253766be25012c34dbb7bc7a007e84f4d5e5a9f4656aa69d312"
   license "MIT"
 
   depends_on "rust" => :build
