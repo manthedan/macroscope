@@ -19,25 +19,9 @@ cargo run -- guide --apply
 cargo run -- explain /usr/local/bin/aws
 cargo run -- apply --dry-run
 cargo run -- apply --yes plan.json
-cargo run -- tui
-cargo run -- tui --apply
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `brief` writes a compact human/AI handoff document that separates high-confidence evidence, recommended decision buckets, ambiguous review items, and follow-up commands; `--full` keeps uncapped detail. `guide` walks through scan → plan → decision buckets → safe apply/manual/handoff → optional verification. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an optional interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
-
-TUI controls:
-
-```text
-Tab / f / p  switch Findings/Plan
-j/k or ↑/↓   move selection
-e            explain selected finding/action
-d / D        dry-run selected action, or related finding actions / whole plan
-x / m        export plan JSON / Markdown
-r            rescan and regenerate plan
-a / A        apply selected / all executable actions in --apply mode only
-?            help
-q / Esc      close modal or quit
-```
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `brief` writes a compact human/AI handoff document that separates high-confidence evidence, recommended decision buckets, ambiguous review items, and follow-up commands; `--full` keeps uncapped detail. `guide` walks through scan → plan → decision buckets → safe apply/manual/handoff → optional verification. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback.
 
 The initial scanner audits:
 
@@ -55,13 +39,12 @@ The initial scanner audits:
 - Conda install, platform, envs, env dirs, and package caches
 - Go toolchain, GOPATH/GOBIN/GOROOT, and GOPATH/bin binary architectures
 - Pretty terminal output with scan progress animation
-- Interactive TUI dashboard with scan/rescan progress animation
+- Guided workflow with scan progress animation
 - Read-only ActionPlan generation
 - `explain` for paths/action IDs/bundle IDs/finding text
 - Dry-run ActionPlan executor
-- TUI ActionPlan context and related actions
-- TUI Plan tab with action detail browsing
-- TUI dry-run, export, explain, rescan, and guarded apply controls
+- Brief output for human/AI handoff
+- Guide decision buckets for apply/manual/handoff/needs-more-evidence
 
 ## Project layout
 
@@ -77,7 +60,6 @@ src/plan.rs      ActionPlan generation, rendering, and relation matching
 src/brief.rs     human/AI handoff brief rendering
 src/guide.rs     guided scan/plan/handoff/apply workflow
 src/apply.rs     dry-run/apply execution and Trash-backed moves
-src/tui.rs       optional ratatui dashboard, progress UI, and guarded TUI apply flow
 src/markdown.rs  Markdown report rendering
 src/output.rs    pretty terminal output and explanations
 src/util.rs      command/path/formatting helpers
@@ -152,6 +134,6 @@ macroscope plan --markdown cleanup-plan.md
 macroscope apply --dry-run
 ```
 
-### Phase 4: TUI
+### Phase 4: Guided workflow
 
-A `ratatui` interface for browsing findings and approving cleanup actions.
+A guided workflow for reviewing findings, assigning decisions, generating a handoff brief, and approving safe cleanup actions.

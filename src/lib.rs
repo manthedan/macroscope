@@ -7,15 +7,14 @@ pub mod model;
 pub mod output;
 pub mod plan;
 pub mod scan;
-pub mod tui;
 pub mod util;
 
 #[cfg(test)]
 mod tests {
+    use super::brief::executable_action_count;
     use super::model::*;
     use super::plan::{action_disposition, slugify, summarize_actions};
     use super::scan::{parse_conda_info, parse_npm_packages};
-    use super::tui::executable_action_count;
     use super::util::simplify_file_arch;
     use std::path::PathBuf;
 

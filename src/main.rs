@@ -8,7 +8,6 @@ use macroscope::{
     output::{print_explanation, print_summary},
     plan::{generate_action_plan, print_action_plan, render_action_plan_markdown},
     scan::{scan, scan_with_cli_progress},
-    tui::run_tui,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -93,13 +92,6 @@ enum Commands {
         /// Required for real mutations. Without this, apply refuses to change the system.
         #[arg(long)]
         yes: bool,
-    },
-
-    /// Open an interactive terminal dashboard.
-    Tui {
-        /// Enable guarded apply controls in the TUI. Plain `tui` remains read-only.
-        #[arg(long)]
-        apply: bool,
     },
 }
 
@@ -191,9 +183,6 @@ fn main() -> Result<()> {
             } else {
                 apply_action_plan(&plan, yes)?;
             }
-        }
-        Commands::Tui { apply } => {
-            run_tui(apply)?;
         }
     }
 

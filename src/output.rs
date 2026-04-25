@@ -1,6 +1,5 @@
 use crate::model::*;
 use crate::plan::{print_action_detail, print_related_actions};
-use crate::tui::{finding_counts, intel_app_count, intel_bin_count, severity_badge};
 use crate::util::*;
 use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use owo_colors::OwoColorize;
@@ -160,7 +159,7 @@ pub fn print_summary(report: &Report) {
     println!();
     println!(
         "{}",
-        "Tip: run `macroscope tui` for the interactive dashboard, or `macroscope scan --markdown report.md` for a shareable report."
+        "Tip: run `macroscope guide` for a guided workflow, or `macroscope scan --markdown report.md` for a shareable report."
             .dimmed()
     );
 }
@@ -403,4 +402,51 @@ pub fn explain_path_target(path: &Path, report: &Report, plan: &ActionPlan) {
     );
     println!("  {}", path.display());
     print_related_actions(&path.display().to_string(), plan);
+}
+
+pub fn intel_bin_count(report: &Report) -> usize {
+    report
+        .local_bins
+        .iter()
+        .filter(|bin| {
+            bin.arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .count()
+}
+
+pub fn intel_app_count(report: &Report) -> usize {
+    report
+        .apps
+        .apps
+        .iter()
+        .filter(|app| {
+            app.executable_arch
+                .as_deref()
+                .is_some_and(|arch| arch.contains("x86_64") && !arch.contains("arm64"))
+        })
+        .count()
+}
+
+pub fn finding_counts(report: &Report) -> (usize, usize, usize) {
+    report
+        .findings
+        .iter()
+        .fold((0, 0, 0), |mut counts, finding| {
+            match finding.severity {
+                Severity::Risk => counts.0 += 1,
+                Severity::Warn => counts.1 += 1,
+                Severity::Info => counts.2 += 1,
+            }
+            counts
+        })
+}
+
+pub fn severity_badge(severity: &Severity) -> String {
+    match severity {
+        Severity::Risk => "RISK".red().bold().to_string(),
+        Severity::Warn => "WARN".yellow().bold().to_string(),
+        Severity::Info => "INFO".blue().bold().to_string(),
+    }
 }

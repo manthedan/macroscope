@@ -162,12 +162,6 @@ pub enum Severity {
     Risk,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TuiTab {
-    Findings,
-    Plan,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ActionPlan {
     pub summary: ActionPlanSummary,

@@ -120,17 +120,6 @@ The guide should be the primary interactive experience:
 
 This is more useful than a generic dashboard because it models the actual workflow: evidence → plan → decision → action/handoff → verification.
 
-### `macroscope tui`
-
-Current: interactive dashboard with scan/rescan progress animation, selectable Findings and Plan tabs, plan summary, related actions, action detail browsing, explain modals, dry-run previews, plan export, rescan, and guarded apply controls. Plain `macroscope tui` is read-only; `macroscope tui --apply` enables Move-to-Trash execution only after a dry-run and typed confirmation.
-
-Positioning:
-
-- Keep the dashboard as optional browsing UI.
-- Do not prioritize a large TUI refactor just for cleanliness.
-- Invest interactive effort in `macroscope guide` unless the dashboard blocks real use.
-- Add dashboard fixes opportunistically, not as a near-term product priority.
-
 ### `macroscope plan`
 
 Current: generate a read-only action plan from scan findings.
@@ -206,12 +195,6 @@ macroscope apply --yes plan.json
 ```
 
 Package-manager and manual actions are printed for review rather than executed automatically.
-
-Interactive apply now exists in the TUI for executable Move-to-Trash actions:
-
-```bash
-macroscope tui --apply
-```
 
 Future:
 
@@ -314,7 +297,7 @@ enum ActionKind {
    - Let users explicitly assign actions to apply/manual/handoff/ignore/needs-more-evidence buckets instead of only showing recommended buckets.
    - Add clearer prompts and summaries before any mutation.
    - Keep mutation behind `--apply`, dry-run, and explicit typed confirmation.
-   - Treat the existing dashboard TUI as optional browsing UI, not the core workflow.
+   - Keep the guide as the core interactive workflow.
 
 3. **Improve ecosystem intelligence only where it makes findings more actionable**
    - Keep Go/Conda/JVM/etc. support shallow unless real evidence or user demand justifies deeper work.
@@ -323,7 +306,7 @@ enum ActionKind {
    - Move ambiguous cleanup into the handoff brief rather than risky automated actions.
 
 4. **Add cautious Homebrew execution paths**
-   - Start with clearer/copyable package-manager commands in the TUI.
+   - Start with clearer/copyable package-manager commands in `guide` and `brief`.
    - Later add explicit action kinds for `brew cleanup`, `brew autoremove`, and `brew install`.
    - Keep real execution gated by dry-run, plan review, typed confirmation, and ownership confidence.
 
@@ -340,17 +323,13 @@ enum ActionKind {
 ## Near-term coding tasks
 
 - [x] Pretty `scan` output
-- [x] Initial `tui`
 - [x] Add `ActionPlan` types
 - [x] Add `plan` command
 - [x] Add Markdown rendering for plans
-- [x] Show plan summary in TUI
 - [x] Add `explain` command
 - [x] Add dry-run executor
 - [x] Add safe Trash implementation
 - [x] Add Homebrew cleanup intelligence
-- [x] Add CLI and TUI scan progress animations
-- [x] Add TUI explain/dry-run/export/rescan controls
-- [x] Add guarded TUI apply mode for Move-to-Trash actions
+- [x] Add CLI scan progress animations
 - [x] Add `brief` handoff command
 - [x] Add `guide` workflow command
