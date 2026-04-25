@@ -2,7 +2,7 @@ use crate::apply::{apply_action_plan, dry_run_action_plan};
 use crate::brief::{executable_action_count, render_brief};
 use crate::markdown::render_markdown;
 use crate::model::*;
-use crate::plan::{generate_action_plan, render_action_plan_markdown};
+use crate::plan::{action_disposition, generate_action_plan, render_action_plan_markdown};
 use crate::scan::scan_with_cli_progress;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
@@ -23,6 +23,7 @@ pub fn run_guide(options: GuideOptions) -> Result<()> {
     let plan = generate_action_plan(&report);
 
     print_session_summary(&report, &plan);
+    print_decision_buckets(&plan);
 
     let report_path = PathBuf::from("macroscope-report.md");
     let plan_path = PathBuf::from("macroscope-plan.md");
@@ -50,7 +51,7 @@ pub fn run_guide(options: GuideOptions) -> Result<()> {
     }
 
     if options.no_prompt || prompt_yes("Write AI/human handoff brief?", true)? {
-        let brief = render_brief(&report, &plan, true);
+        let brief = render_brief(&report, &plan, true, false);
         write_file(&options.brief_path, &brief)?;
     }
 
@@ -133,6 +134,47 @@ fn print_session_summary(report: &Report, plan: &ActionPlan) {
     println!();
 }
 
+fn print_decision_buckets(plan: &ActionPlan) {
+    if plan.actions.is_empty() {
+        return;
+    }
+
+    println!("{}", "Guide step 3/4: decision buckets".bold());
+    let buckets = [
+        (ActionDisposition::ApplyNow, "Apply now"),
+        (ActionDisposition::Manual, "Manual/package-manager"),
+        (ActionDisposition::Handoff, "Handoff"),
+        (ActionDisposition::NeedsMoreEvidence, "Needs more evidence"),
+    ];
+
+    for (disposition, label) in buckets {
+        let actions: Vec<&PlannedAction> = plan
+            .actions
+            .iter()
+            .filter(|action| action_disposition(action) == disposition)
+            .collect();
+        if actions.is_empty() {
+            continue;
+        }
+
+        println!("  {}: {} action(s)", label.bold(), actions.len());
+        for action in actions.iter().take(4) {
+            println!("    - {} {}", action.id.dimmed(), action.title.as_str());
+        }
+        if actions.len() > 4 {
+            println!("    - … and {} more", actions.len() - 4);
+        }
+    }
+
+    println!();
+    println!(
+        "{}",
+        "The guide writes the handoff brief with these buckets so you can continue manually or with an AI agent."
+            .dimmed()
+    );
+    println!();
+}
+
 fn maybe_apply(plan: &ActionPlan, no_prompt: bool) -> Result<()> {
     let executable = executable_action_count(plan);
     if executable == 0 {
@@ -144,7 +186,7 @@ fn maybe_apply(plan: &ActionPlan, no_prompt: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", "Guide step 3/4: guarded apply".bold());
+    println!("{}", "Guide step 4/4: guarded apply".bold());
     println!(
         "{}",
         format!(

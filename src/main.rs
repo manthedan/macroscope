@@ -60,6 +60,10 @@ enum Commands {
         /// Add extra guardrails/instructions for AI coding agents.
         #[arg(long)]
         for_llm: bool,
+
+        /// Include uncapped finding/action detail and extra raw evidence.
+        #[arg(long)]
+        full: bool,
     },
 
     /// Walk through scan, plan, decision, handoff, and optional guarded apply.
@@ -151,10 +155,14 @@ fn main() -> Result<()> {
             let plan = generate_action_plan(&report);
             print_explanation(&target, &report, &plan);
         }
-        Commands::Brief { markdown, for_llm } => {
+        Commands::Brief {
+            markdown,
+            for_llm,
+            full,
+        } => {
             let report = scan_with_cli_progress("Scanning for handoff brief");
             let plan = generate_action_plan(&report);
-            let rendered = render_brief(&report, &plan, for_llm);
+            let rendered = render_brief(&report, &plan, for_llm, full);
 
             if let Some(path) = markdown {
                 fs::write(&path, rendered).with_context(|| {

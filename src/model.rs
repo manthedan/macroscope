@@ -217,3 +217,11 @@ pub enum ActionKind {
     BrewInstall { package: String },
     Manual { instructions: String },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionDisposition {
+    ApplyNow,
+    Manual,
+    Handoff,
+    NeedsMoreEvidence,
+}

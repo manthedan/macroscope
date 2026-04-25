@@ -13,6 +13,7 @@ cargo run -- scan --json
 cargo run -- plan
 cargo run -- plan --markdown cleanup-plan.md
 cargo run -- brief --markdown macroscope-brief.md --for-llm
+cargo run -- brief --markdown macroscope-brief.md --for-llm --full
 cargo run -- guide
 cargo run -- guide --apply
 cargo run -- explain /usr/local/bin/aws
@@ -22,7 +23,7 @@ cargo run -- tui
 cargo run -- tui --apply
 ```
 
-`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `brief` writes a human/AI handoff document that separates high-confidence evidence from ambiguous review items. `guide` walks through scan → plan → decision → safe apply/manual/handoff → optional verification. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an optional interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
+`scan` prints a pretty table-based summary by default. `plan` generates a read-only cleanup/migration action plan. `brief` writes a compact human/AI handoff document that separates high-confidence evidence, recommended decision buckets, ambiguous review items, and follow-up commands; `--full` keeps uncapped detail. `guide` walks through scan → plan → decision buckets → safe apply/manual/handoff → optional verification. `explain` gives detail for a path, action ID, bundle ID, or finding text. `apply --dry-run` previews what an action plan would do without changing anything. `apply --yes` can execute safe move-to-Trash actions while printing package-manager/manual actions for review. File/symlink cleanup uses a direct `~/.Trash` move first to avoid Finder Automation permission prompts, with Finder as a fallback. `tui` opens an optional interactive terminal dashboard with Findings and Plan tabs. Plain `tui` is read-only; `tui --apply` enables guarded Move-to-Trash execution after dry-run and typed confirmation.
 
 TUI controls:
 

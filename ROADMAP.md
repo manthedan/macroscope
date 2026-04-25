@@ -100,7 +100,7 @@ Planned:
 
 ### `macroscope guide`
 
-Current: guided terminal workflow that walks a user through scan, plan, report/brief export, dry-run, optional guarded apply, and optional verification.
+Current: guided terminal workflow that walks a user through scan, plan, decision-bucket summary, report/brief export, dry-run, optional guarded apply, and optional verification.
 
 ```bash
 macroscope guide
@@ -173,12 +173,13 @@ Should answer:
 
 ### `macroscope brief`
 
-Current: generate a concise handoff document designed for humans, Codex, Claude Code, or similar AI coding agents.
+Current: generate a concise handoff document designed for humans, Codex, Claude Code, or similar AI coding agents. By default it caps long finding/action lists; `--full` includes uncapped detail.
 
 ```bash
 macroscope brief
 macroscope brief --markdown macroscope-brief.md
 macroscope brief --for-llm
+macroscope brief --for-llm --full
 ```
 
 The brief should include:
@@ -186,7 +187,8 @@ The brief should include:
 - Machine context: macOS, architecture, shell, Homebrew prefix, PATH summary
 - High-confidence findings
 - Ambiguous findings that need human judgment
-- Suggested next commands, grouped by risk
+- Recommended decision buckets: apply now, manual/package-manager, handoff, needs more evidence
+- Suggested follow-up commands for verification/regeneration after action
 - Things Macroscope intentionally will not do automatically
 - Questions an AI agent should ask before mutating the system
 - Raw evidence appendix for traceability
@@ -304,12 +306,12 @@ enum ActionKind {
 
 1. **Improve the AI/human handoff brief**
    - Keep `macroscope brief` compact enough to paste into Codex/Claude Code.
-   - Better separate high-confidence evidence from ambiguous ecosystem-specific findings.
+   - Continue sharpening the separation between high-confidence evidence, decision buckets, and ecosystem-specific judgment notes.
    - Add richer raw evidence only where it helps decision-making.
    - Keep “do not automate” warnings and questions explicit.
 
 2. **Improve the guided cleanup workflow**
-   - Make `macroscope guide` better at assigning findings/actions to apply/manual/handoff/ignore/needs-more-evidence buckets.
+   - Let users explicitly assign actions to apply/manual/handoff/ignore/needs-more-evidence buckets instead of only showing recommended buckets.
    - Add clearer prompts and summaries before any mutation.
    - Keep mutation behind `--apply`, dry-run, and explicit typed confirmation.
    - Treat the existing dashboard TUI as optional browsing UI, not the core workflow.

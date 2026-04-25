@@ -13,7 +13,7 @@ pub mod util;
 #[cfg(test)]
 mod tests {
     use super::model::*;
-    use super::plan::{slugify, summarize_actions};
+    use super::plan::{action_disposition, slugify, summarize_actions};
     use super::scan::{parse_conda_info, parse_npm_packages};
     use super::tui::executable_action_count;
     use super::util::simplify_file_arch;
@@ -117,6 +117,39 @@ mod tests {
         assert_eq!(report.envs.len(), 2);
         assert_eq!(report.envs_dirs, vec!["/opt/anaconda3/envs"]);
         assert_eq!(report.package_caches.len(), 2);
+    }
+
+    #[test]
+    fn classifies_action_dispositions() {
+        let trash = planned_action(
+            "trash-old-tool",
+            true,
+            ActionRisk::Medium,
+            ActionKind::MoveToTrash {
+                path: PathBuf::from("/usr/local/bin/old-tool"),
+            },
+        );
+        assert_eq!(action_disposition(&trash), ActionDisposition::ApplyNow);
+
+        let manual = planned_action(
+            "review-cleanup",
+            false,
+            ActionRisk::Low,
+            ActionKind::Manual {
+                instructions: "Review cleanup".into(),
+            },
+        );
+        assert_eq!(action_disposition(&manual), ActionDisposition::Manual);
+
+        let handoff = planned_action(
+            "review-owner",
+            false,
+            ActionRisk::Medium,
+            ActionKind::Manual {
+                instructions: "Review owner".into(),
+            },
+        );
+        assert_eq!(action_disposition(&handoff), ActionDisposition::Handoff);
     }
 
     #[test]

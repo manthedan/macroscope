@@ -1,7 +1,10 @@
 use crate::model::*;
-use crate::plan::{action_instruction, action_kind_label};
+use crate::plan::{action_disposition, action_instruction, action_kind_label};
 
-pub fn render_brief(report: &Report, plan: &ActionPlan, for_llm: bool) -> String {
+const COMPACT_FINDING_LIMIT: usize = 12;
+const COMPACT_ACTION_LIMIT: usize = 8;
+
+pub fn render_brief(report: &Report, plan: &ActionPlan, for_llm: bool, full: bool) -> String {
     let mut out = String::new();
     out.push_str("# Macroscope Handoff Brief\n\n");
 
@@ -18,12 +21,16 @@ pub fn render_brief(report: &Report, plan: &ActionPlan, for_llm: bool) -> String
     push_machine_context(&mut out, report);
     push_findings_summary(&mut out, report);
     push_action_summary(&mut out, plan);
-    push_high_confidence_findings(&mut out, report);
-    push_ambiguous_findings(&mut out, report, plan);
-    push_suggested_next_commands(&mut out, plan);
+    if for_llm {
+        push_agent_prompt(&mut out);
+    }
+    push_high_confidence_findings(&mut out, report, full);
+    push_decision_buckets(&mut out, plan, full);
+    push_ecosystem_notes(&mut out, report);
+    push_follow_up_commands(&mut out, plan);
     push_do_not_automate(&mut out);
     push_questions(&mut out, report, plan);
-    push_raw_evidence(&mut out, report);
+    push_raw_evidence(&mut out, report, full);
 
     out
 }
@@ -79,7 +86,14 @@ fn push_action_summary(out: &mut String, plan: &ActionPlan) {
     out.push_str(&format!("- High risk: {}\n\n", plan.summary.high_risk));
 }
 
-fn push_high_confidence_findings(out: &mut String, report: &Report) {
+fn push_agent_prompt(out: &mut String) {
+    out.push_str("## Suggested agent prompt\n\n");
+    out.push_str(
+        "> Help me clean up this Mac developer environment. Use the evidence below to propose a safe sequence. Do not mutate anything without asking. Prefer package-manager operations for owner-managed files, use Trash-backed cleanup for standalone files, and move ambiguous ecosystem-specific work into manual review. Start by asking which flagged apps/tools are still used.\n\n",
+    );
+}
+
+fn push_high_confidence_findings(out: &mut String, report: &Report, full: bool) {
     out.push_str("## High-confidence findings\n\n");
     let notable: Vec<&Finding> = report
         .findings
@@ -92,36 +106,96 @@ fn push_high_confidence_findings(out: &mut String, report: &Report) {
         return;
     }
 
-    for finding in notable {
+    let limit = if full {
+        notable.len()
+    } else {
+        COMPACT_FINDING_LIMIT
+    };
+    for finding in notable.iter().take(limit) {
         out.push_str(&format!(
             "- **{:?}**: {} — {}\n",
             finding.severity, finding.title, finding.detail
         ));
     }
+    if notable.len() > limit {
+        out.push_str(&format!(
+            "- … and {} more risk/warning finding(s). Use `macroscope scan --markdown macroscope-report.md` for the full list.\n",
+            notable.len() - limit
+        ));
+    }
     out.push('\n');
 }
 
-fn push_ambiguous_findings(out: &mut String, report: &Report, plan: &ActionPlan) {
-    out.push_str("## Needs human judgment\n\n");
+fn push_decision_buckets(out: &mut String, plan: &ActionPlan, full: bool) {
+    out.push_str("## Recommended decision buckets\n\n");
 
-    let mut wrote = false;
-    for action in &plan.actions {
-        let ambiguous = matches!(action.confidence, Confidence::Low | Confidence::Medium)
-            || matches!(
-                action.kind,
-                ActionKind::Manual { .. } | ActionKind::BrewInstall { .. }
-            );
-        if ambiguous {
-            wrote = true;
-            out.push_str(&format!("- `{}` — {}\n", action.id, action.title));
-            out.push_str(&format!("  - Why: {}\n", action.rationale));
+    let buckets = [
+        (
+            ActionDisposition::ApplyNow,
+            "Apply now candidates",
+            "Only execute after dry-run and explicit confirmation.",
+        ),
+        (
+            ActionDisposition::Manual,
+            "Manual/package-manager review",
+            "Use the owning package manager or app-specific process where possible.",
+        ),
+        (
+            ActionDisposition::Handoff,
+            "Handoff to human/AI agent",
+            "Good candidates for contextual reasoning before any mutation.",
+        ),
+        (
+            ActionDisposition::NeedsMoreEvidence,
+            "Needs more evidence",
+            "Do not act until provenance, ownership, or current use is clearer.",
+        ),
+    ];
+
+    for (disposition, heading, note) in buckets {
+        let actions: Vec<&PlannedAction> = plan
+            .actions
+            .iter()
+            .filter(|action| action_disposition(action) == disposition)
+            .collect();
+
+        out.push_str(&format!("### {heading}\n\n"));
+        out.push_str(&format!("{note}\n\n"));
+        if actions.is_empty() {
+            out.push_str("- None.\n\n");
+            continue;
+        }
+
+        let limit = if full {
+            actions.len()
+        } else {
+            COMPACT_ACTION_LIMIT
+        };
+        for action in actions.iter().take(limit) {
             out.push_str(&format!(
-                "  - Suggested next step: {}\n",
-                action_instruction(action)
+                "- `{}` — {} (`{}`, {:?} risk, {:?} confidence)\n",
+                action.id,
+                action.title,
+                action_kind_label(&action.kind),
+                action.risk,
+                action.confidence
+            ));
+            out.push_str(&format!("  - Next: {}\n", action_instruction(action)));
+        }
+        if actions.len() > limit {
+            out.push_str(&format!(
+                "- … and {} more action(s) in this bucket. Use `macroscope plan --markdown macroscope-plan.md` for the full plan.\n",
+                actions.len() - limit
             ));
         }
+        out.push('\n');
     }
+}
 
+fn push_ecosystem_notes(out: &mut String, report: &Report) {
+    out.push_str("## Ecosystem notes needing judgment\n\n");
+
+    let mut wrote = false;
     if report.dev_tools.conda.conda.path.is_some() {
         wrote = true;
         out.push_str("- Conda is installed. Treat Conda root/env deletion as manual review only; export important envs first.\n");
@@ -133,12 +207,12 @@ fn push_ambiguous_findings(out: &mut String, report: &Report, plan: &ActionPlan)
     }
 
     if !wrote {
-        out.push_str("No ambiguous actions were generated.\n");
+        out.push_str("No ecosystem-specific judgment notes were generated.\n");
     }
     out.push('\n');
 }
 
-fn push_suggested_next_commands(out: &mut String, plan: &ActionPlan) {
+fn push_follow_up_commands(out: &mut String, plan: &ActionPlan) {
     out.push_str("## Follow-up commands\n\n");
     out.push_str("These commands are for verification or for regenerating artifacts after manual changes. They are not required just to read this brief.\n\n");
     out.push_str("After taking manual/package-manager actions, rescan and regenerate the review artifacts:\n\n");
@@ -158,24 +232,6 @@ fn push_suggested_next_commands(out: &mut String, plan: &ActionPlan) {
         out.push_str(
             "```bash\nmacroscope plan --json > plan.json\nmacroscope apply --dry-run plan.json\nmacroscope apply --yes plan.json\n```\n\n",
         );
-    }
-
-    let manual_actions: Vec<&PlannedAction> = plan
-        .actions
-        .iter()
-        .filter(|action| !matches!(action.kind, ActionKind::MoveToTrash { .. }))
-        .collect();
-    if !manual_actions.is_empty() {
-        out.push_str("Manual/package-manager review items:\n\n");
-        for action in manual_actions {
-            out.push_str(&format!(
-                "- `{}` (`{}`): {}\n",
-                action.id,
-                action_kind_label(&action.kind),
-                action_instruction(action)
-            ));
-        }
-        out.push('\n');
     }
 }
 
@@ -214,7 +270,7 @@ fn push_questions(out: &mut String, report: &Report, plan: &ActionPlan) {
     out.push('\n');
 }
 
-fn push_raw_evidence(out: &mut String, report: &Report) {
+fn push_raw_evidence(out: &mut String, report: &Report, full: bool) {
     out.push_str("## Raw evidence summary\n\n");
     out.push_str(&format!(
         "- Homebrew formulae: {}\n",
@@ -256,6 +312,13 @@ fn push_raw_evidence(out: &mut String, report: &Report) {
         "- GOPATH/bin binaries: {}\n",
         report.dev_tools.go.binaries.len()
     ));
+
+    if full {
+        out.push_str("\n### PATH\n\n");
+        for (idx, entry) in report.path.entries.iter().enumerate() {
+            out.push_str(&format!("{}. `{entry}`\n", idx + 1));
+        }
+    }
 }
 
 fn finding_counts(report: &Report) -> (usize, usize, usize) {

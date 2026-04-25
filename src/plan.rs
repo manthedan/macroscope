@@ -383,6 +383,27 @@ pub fn action_instruction(action: &PlannedAction) -> String {
     }
 }
 
+pub fn action_disposition(action: &PlannedAction) -> ActionDisposition {
+    match action.kind {
+        ActionKind::MoveToTrash { .. } => ActionDisposition::ApplyNow,
+        ActionKind::BrewInstall { .. } => ActionDisposition::Manual,
+        ActionKind::Manual { .. } => match (action.confidence, action.risk) {
+            (Confidence::Low, _) | (_, ActionRisk::High) => ActionDisposition::NeedsMoreEvidence,
+            (Confidence::Medium, _) | (_, ActionRisk::Medium) => ActionDisposition::Handoff,
+            (Confidence::High, ActionRisk::Low) => ActionDisposition::Manual,
+        },
+    }
+}
+
+pub fn action_disposition_label(disposition: ActionDisposition) -> &'static str {
+    match disposition {
+        ActionDisposition::ApplyNow => "apply now",
+        ActionDisposition::Manual => "manual",
+        ActionDisposition::Handoff => "handoff",
+        ActionDisposition::NeedsMoreEvidence => "needs more evidence",
+    }
+}
+
 pub fn risk_badge(risk: ActionRisk) -> String {
     match risk {
         ActionRisk::Low => "LOW".green().bold().to_string(),
