@@ -12,6 +12,6 @@ class Macroscope < Formula
   end
 
   test do
-    system "#{bin}/macroscope", "--version"
+    system bin/"macroscope", "--version"
   end
 end
