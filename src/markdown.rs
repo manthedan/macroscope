@@ -109,10 +109,11 @@ pub fn render_markdown(report: &Report) -> String {
     ));
     for listener in &report.runtime.listeners {
         out.push_str(&format!(
-            "- PID `{}` `{}` — `{}` (wildcard `{}`, loopback `{}`)\n",
+            "- PID `{}` `{}` — `{}` (exposure `{:?}`, wildcard `{}`, loopback `{}`)\n",
             listener.pid,
             md_escape(listener.command.as_deref().unwrap_or("unknown")),
             md_escape(&listener.endpoint),
+            listener.exposure,
             listener.wildcard,
             listener.loopback
         ));

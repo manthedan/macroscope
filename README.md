@@ -57,7 +57,7 @@ brew install macroscope
 For an agent-oriented evidence pass:
 
 ```bash
-macroscope snapshot /tmp/macroscope-before.json
+macroscope snapshot --name before-cleanup
 macroscope graph --json > /tmp/macroscope-graph.json
 macroscope brief --markdown /tmp/macroscope-brief.md --for-llm --full
 macroscope plan --json > /tmp/macroscope-plan.json
@@ -66,8 +66,8 @@ macroscope plan --json > /tmp/macroscope-plan.json
 After approved cleanup, compare and verify stable findings:
 
 ```bash
-macroscope diff /tmp/macroscope-before.json
-macroscope verify /tmp/macroscope-before.json --finding '<finding-id>' --strict
+macroscope diff --since before-cleanup
+macroscope verify ~/.local/state/macroscope/snapshots/before-cleanup.json --finding '<finding-id>' --strict
 ```
 
 For a human-readable workflow:
@@ -109,9 +109,13 @@ macroscope scan
 macroscope scan --json
 macroscope scan --markdown macroscope-report.md
 macroscope snapshot before.json
+macroscope snapshot --name post-cleanup
+macroscope history
 macroscope diff before.json [after.json]
+macroscope diff --since post-cleanup
 macroscope verify before.json --finding '<finding-id>' --strict
 macroscope graph --json
+macroscope graph --finding '<finding-id>'
 
 macroscope decide '<finding-id>' keep --reason 'intentional service'
 macroscope decide '<finding-id>' snooze --days 14
@@ -131,6 +135,8 @@ macroscope guide --apply
 macroscope guide --no-prompt
 
 macroscope explain /usr/local/bin/aws
+macroscope explain --port 8765
+macroscope explain --pid 994
 macroscope apply --dry-run
 macroscope apply --yes plan.json
 ```
@@ -141,11 +147,11 @@ Collects local evidence and prints a pretty summary by default. JSON and Markdow
 
 ### `snapshot`, `diff`, and `verify`
 
-`snapshot` stores a versioned evidence report. `diff` compares stable finding IDs, launch-item definitions, listeners, and graph size against another snapshot or a fresh scan. `verify` checks selected findings—or all baseline persistence/runtime warnings by default—against current state. Use `--strict` when an agent or CI workflow needs a failing exit status for unresolved targets.
+`snapshot` stores a versioned evidence report. Use `--name` (or omit the output path) for managed storage under `~/.local/state/macroscope/snapshots`; `history` lists those baselines. `diff --since <name>` compares a managed baseline with a fresh scan. `diff` compares stable finding IDs, launch-item definitions, listeners, and graph size. `verify` checks selected findings—or all baseline persistence/runtime warnings by default—against current state. Use `--strict` when an agent or CI workflow needs a failing exit status for unresolved targets.
 
 ### `graph`
 
-Emits the correlation graph connecting launch labels, processes, listeners, executable paths, applications, and inferred package ownership.
+Emits the correlation graph connecting launch labels, processes, listeners, executable paths, applications, and inferred package ownership. `--finding <id>` returns only the connected evidence neighborhood for focused investigation.
 
 ### `decide`, `decisions`, and `undecide`
 
@@ -153,7 +159,7 @@ Records durable `keep`, `ignore`, or time-limited `snooze` decisions in `~/.conf
 
 ### `plan`
 
-Generates a read-only cleanup/migration action plan. Actions include risk, confidence, provenance, preconditions, root requirements, undo steps, verification checks, and a structured kind such as `MoveToTrash`, `BrewInstall`, or `Manual`.
+Generates a read-only cleanup/migration action plan. Actions include risk, confidence, provenance, preconditions, root requirements, exact reviewed argv for process/launchd remediation, undo steps, verification checks, and a structured kind such as `MoveToTrash`, `BrewInstall`, or `Manual`. Exact launchctl/kill steps remain approval-gated and are never executed as automatic actions.
 
 ### `brief`
 
@@ -184,25 +190,25 @@ Plain `guide` is read-only. `guide --apply` enables guarded Move-to-Trash execut
 
 ### `explain`
 
-Explains a path, action ID, bundle ID, or finding text and shows related planned actions.
+Explains a path, action ID, bundle ID, finding text, TCP port (`--port`), or process (`--pid`) and shows parent, listener, launchd, finding, and planned-action evidence.
 
 ### `apply`
 
-Executes only supported action kinds. In v0.2.0 that means only guarded `MoveToTrash` actions under `/usr/local/bin`. Package-manager and manual actions are printed for review and are not executed automatically. Real apply rejects stale externally supplied actions, duplicate IDs, protected/arbitrary paths, and missing safeguards.
+Executes only supported action kinds. Only guarded `MoveToTrash` actions under `/usr/local/bin` execute automatically. Package-manager, process, launchd, and other manual actions are printed for review and are not executed automatically. Real apply rejects stale externally supplied actions, duplicate IDs, protected/arbitrary paths, and missing safeguards.
 
 ## What Macroscope scans
 
 - Third-party LaunchAgents and LaunchDaemons, including KeepAlive, RunAtLoad, executable paths, and associated apps
 - Correlation chains from launch labels through processes/listeners to executables and app/package provenance
-- Processes, PPIDs, age, state, CPU/memory, and commands
-- TCP listeners, wildcard exposure, loopback binding, and process ownership
+- Processes, PPIDs, process groups, age, state, CPU/memory, and commands
+- TCP listeners classified as loopback, LAN, Tailscale, wildcard, public, or unknown, with process ownership
 - Broken AppTranslocation persistence, orphaned privileged helpers, old detached listeners, detached agent browsers, and zombies
 - System architecture and macOS version
 - Homebrew prefix, formulae, casks, leaves, outdated packages, services, autoremove preview, and cleanup dry-run output
 - `/Applications` and `~/Applications`
 - Duplicate macOS app bundle identifiers
 - App versions, bundle IDs, paths, and executable architecture
-- Intel-only apps on Apple Silicon
+- Intel-only apps on Apple Silicon, collapsed in default terminal output while retained in JSON/Markdown
 - `/usr/local/bin` standalone binaries and symlinks, with ownership heuristics
 - PATH ordering and duplicate entries
 - Node/npm versions and global npm packages

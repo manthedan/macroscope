@@ -212,6 +212,10 @@ pub struct ProcessEntry {
     pub pid: u32,
     pub ppid: u32,
     #[serde(default)]
+    pub pgid: u32,
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
     pub executable: Option<PathBuf>,
     pub elapsed_seconds: u64,
     pub state: String,
@@ -228,6 +232,20 @@ pub struct ListenerEntry {
     pub port: Option<u16>,
     pub wildcard: bool,
     pub loopback: bool,
+    #[serde(default)]
+    pub exposure: ListenerExposure,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListenerExposure {
+    Loopback,
+    Tailscale,
+    Lan,
+    Wildcard,
+    Public,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -325,7 +343,7 @@ pub struct ActionPlan {
 }
 
 fn action_plan_schema() -> u32 {
-    2
+    3
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -357,6 +375,8 @@ pub struct ActionControls {
     pub expected_file: Option<FileIdentity>,
     pub provenance: Vec<String>,
     pub preconditions: Vec<ActionCheck>,
+    #[serde(default)]
+    pub recommended_steps: Vec<ActionStep>,
     pub undo: Vec<ActionStep>,
     pub verification: Vec<ActionCheck>,
 }
@@ -385,6 +405,10 @@ pub enum ActionCheckKind {
     FindingPresent { finding_id: String },
     FindingAbsent { finding_id: String },
     CommandSucceeds { command: CommandSpec },
+    ProcessMatches { pid: u32, command_contains: String },
+    ZombieParent { zombie_pid: u32, parent_pid: u32 },
+    ListenerPresent { pid: u32, port: u16 },
+    PortClosed { port: u16 },
     ManualConfirmation,
 }
 

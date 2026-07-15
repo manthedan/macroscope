@@ -2,6 +2,7 @@ use crate::model::*;
 use plist::Value;
 use std::collections::BTreeSet;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -306,7 +307,10 @@ fn vendor_tokens(label: &str) -> Vec<String> {
 pub fn scan_runtime() -> RuntimeReport {
     let mut report = RuntimeReport::default();
     match Command::new("ps")
-        .args(["-axo", "pid=,ppid=,etime=,state=,%cpu=,%mem=,command="])
+        .args([
+            "-axo",
+            "pid=,ppid=,pgid=,uid=,etime=,state=,%cpu=,%mem=,command=",
+        ])
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -335,12 +339,16 @@ pub fn scan_runtime() -> RuntimeReport {
             .push(format!("failed to collect process executables: {error}")),
     }
 
+    let tailscale_addresses = confirmed_tailscale_addresses();
     match Command::new("lsof")
         .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
         .output()
     {
         Ok(output) if output.status.success() => {
-            report.listeners = parse_lsof_output(&String::from_utf8_lossy(&output.stdout));
+            report.listeners = parse_lsof_output_with_tailscale_addresses(
+                &String::from_utf8_lossy(&output.stdout),
+                &tailscale_addresses,
+            );
         }
         Ok(output)
             if output.status.code() == Some(1)
@@ -348,7 +356,10 @@ pub fn scan_runtime() -> RuntimeReport {
                 && String::from_utf8_lossy(&output.stderr).trim().is_empty() => {}
         Ok(output) => {
             if !output.stdout.is_empty() {
-                report.listeners = parse_lsof_output(&String::from_utf8_lossy(&output.stdout));
+                report.listeners = parse_lsof_output_with_tailscale_addresses(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &tailscale_addresses,
+                );
             }
             report.errors.push(format!(
                 "lsof failed with status {}: {}",
@@ -360,6 +371,31 @@ pub fn scan_runtime() -> RuntimeReport {
     }
 
     report
+}
+
+fn confirmed_tailscale_addresses() -> BTreeSet<IpAddr> {
+    let candidates = [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "tailscale",
+    ];
+    for candidate in candidates {
+        let Ok(output) = Command::new(candidate).arg("ip").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let addresses: BTreeSet<IpAddr> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
+    BTreeSet::new()
 }
 
 pub fn parse_ps_executables(output: &str) -> std::collections::BTreeMap<u32, PathBuf> {
@@ -382,6 +418,8 @@ pub fn parse_ps_output(output: &str) -> Vec<ProcessEntry> {
             let mut fields = line.split_whitespace();
             let pid = fields.next()?.parse().ok()?;
             let ppid = fields.next()?.parse().ok()?;
+            let pgid = fields.next()?.parse().ok()?;
+            let uid = fields.next()?.parse().ok()?;
             let elapsed_seconds = parse_elapsed(fields.next()?)?;
             let state = fields.next()?.to_string();
             let cpu_percent = fields.next()?.parse().ok()?;
@@ -393,6 +431,8 @@ pub fn parse_ps_output(output: &str) -> Vec<ProcessEntry> {
             Some(ProcessEntry {
                 pid,
                 ppid,
+                pgid,
+                uid,
                 executable: None,
                 elapsed_seconds,
                 state,
@@ -1032,6 +1072,13 @@ pub fn parse_elapsed(value: &str) -> Option<u64> {
 }
 
 pub fn parse_lsof_output(output: &str) -> Vec<ListenerEntry> {
+    parse_lsof_output_with_tailscale_addresses(output, &BTreeSet::new())
+}
+
+pub fn parse_lsof_output_with_tailscale_addresses(
+    output: &str,
+    tailscale_addresses: &BTreeSet<IpAddr>,
+) -> Vec<ListenerEntry> {
     let mut listeners = Vec::new();
     let mut pid = None;
     let mut command = None;
@@ -1048,7 +1095,8 @@ pub fn parse_lsof_output(output: &str) -> Vec<ListenerEntry> {
             "c" => command = Some(value.to_string()),
             "n" => {
                 if let Some(pid) = pid {
-                    let (port, wildcard, loopback) = endpoint_traits(value);
+                    let (port, wildcard, loopback, exposure) =
+                        endpoint_traits(value, tailscale_addresses);
                     listeners.push(ListenerEntry {
                         pid,
                         command: command.clone(),
@@ -1056,6 +1104,7 @@ pub fn parse_lsof_output(output: &str) -> Vec<ListenerEntry> {
                         port,
                         wildcard,
                         loopback,
+                        exposure,
                     });
                 }
             }
@@ -1066,7 +1115,10 @@ pub fn parse_lsof_output(output: &str) -> Vec<ListenerEntry> {
     listeners
 }
 
-fn endpoint_traits(endpoint: &str) -> (Option<u16>, bool, bool) {
+fn endpoint_traits(
+    endpoint: &str,
+    tailscale_addresses: &BTreeSet<IpAddr>,
+) -> (Option<u16>, bool, bool, ListenerExposure) {
     let (address, port) = if endpoint.starts_with('[') {
         endpoint
             .rfind("]:")
@@ -1076,10 +1128,68 @@ fn endpoint_traits(endpoint: &str) -> (Option<u16>, bool, bool) {
         endpoint.rsplit_once(':').unwrap_or((endpoint, ""))
     };
     let normalized = address.trim_matches(['[', ']']).to_ascii_lowercase();
-    let wildcard = matches!(normalized.as_str(), "*" | "0.0.0.0" | "::");
-    let loopback =
+    let textual_wildcard = matches!(normalized.as_str(), "*" | "0.0.0.0" | "::");
+    let textual_loopback =
         normalized == "localhost" || normalized == "::1" || normalized.starts_with("127.");
-    (port.parse().ok(), wildcard, loopback)
+    let exposure = if textual_wildcard {
+        ListenerExposure::Wildcard
+    } else if textual_loopback {
+        ListenerExposure::Loopback
+    } else {
+        normalized
+            .split('%')
+            .next()
+            .and_then(|address| address.parse::<IpAddr>().ok())
+            .map(|address| classify_ip_exposure(address, tailscale_addresses))
+            .unwrap_or(ListenerExposure::Unknown)
+    };
+    let wildcard = textual_wildcard || exposure == ListenerExposure::Wildcard;
+    let loopback = textual_loopback || exposure == ListenerExposure::Loopback;
+    (port.parse().ok(), wildcard, loopback, exposure)
+}
+
+fn classify_ip_exposure(
+    address: IpAddr,
+    tailscale_addresses: &BTreeSet<IpAddr>,
+) -> ListenerExposure {
+    if let IpAddr::V6(address) = address {
+        let segments = address.segments();
+        if segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+            let mapped = Ipv4Addr::new(
+                (segments[6] >> 8) as u8,
+                segments[6] as u8,
+                (segments[7] >> 8) as u8,
+                segments[7] as u8,
+            );
+            return classify_ip_exposure(IpAddr::V4(mapped), tailscale_addresses);
+        }
+    }
+    match address {
+        address if tailscale_addresses.contains(&address) => ListenerExposure::Tailscale,
+        IpAddr::V4(address) if address.is_loopback() => ListenerExposure::Loopback,
+        IpAddr::V6(address) if address.is_loopback() => ListenerExposure::Loopback,
+        IpAddr::V4(address) if is_tailscale_ipv4(address) => ListenerExposure::Unknown,
+        IpAddr::V6(address) if is_tailscale_ipv6(address) => ListenerExposure::Unknown,
+        IpAddr::V4(address) if address.is_private() || address.is_link_local() => {
+            ListenerExposure::Lan
+        }
+        IpAddr::V6(address) if address.is_unique_local() || address.is_unicast_link_local() => {
+            ListenerExposure::Lan
+        }
+        IpAddr::V4(address) if address.is_unspecified() => ListenerExposure::Wildcard,
+        IpAddr::V6(address) if address.is_unspecified() => ListenerExposure::Wildcard,
+        IpAddr::V4(_) | IpAddr::V6(_) => ListenerExposure::Public,
+    }
+}
+
+fn is_tailscale_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn is_tailscale_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
 }
 
 pub fn launch_item_identity(item: &LaunchItem) -> String {
@@ -1179,7 +1289,7 @@ pub fn detect_hygiene_findings(
     for listener in runtime
         .listeners
         .iter()
-        .filter(|listener| listener.wildcard)
+        .filter(|listener| !listener.loopback)
     {
         let Some(process) = runtime
             .processes
@@ -1199,7 +1309,13 @@ pub fn detect_hygiene_findings(
             let service = stable_service_signature(process);
             let endpoint = listener
                 .port
-                .map(|port| format!("all-{port}"))
+                .map(|port| {
+                    if listener.exposure == ListenerExposure::Wildcard {
+                        format!("all-{port}")
+                    } else {
+                        format!("{:?}-{port}", listener.exposure).to_ascii_lowercase()
+                    }
+                })
                 .unwrap_or_else(|| listener.endpoint.clone());
             let id = format!(
                 "old-detached-listener:{:016x}:{endpoint}",
@@ -1211,19 +1327,47 @@ pub fn detect_hygiene_findings(
             findings.push(Finding {
                 id,
                 category: FindingCategory::Runtime,
-                severity: Severity::Risk,
+                severity: if matches!(
+                    listener.exposure,
+                    ListenerExposure::Wildcard | ListenerExposure::Public
+                ) {
+                    Severity::Risk
+                } else {
+                    Severity::Warn
+                },
                 confidence: Confidence::High,
-                title: "Old detached process listens on all interfaces".into(),
+                title: match listener.exposure {
+                    ListenerExposure::Wildcard => {
+                        "Old detached process listens on all interfaces".into()
+                    }
+                    ListenerExposure::Tailscale => {
+                        "Old detached process listens on a Tailscale address".into()
+                    }
+                    ListenerExposure::Lan => "Old detached process listens on a LAN address".into(),
+                    ListenerExposure::Public => {
+                        "Old detached process listens on a public address".into()
+                    }
+                    ListenerExposure::Loopback | ListenerExposure::Unknown => {
+                        "Old detached process has a non-loopback listener".into()
+                    }
+                },
                 detail: format!(
-                    "PID {} has PPID 1, has run for {}, and listens on {}.",
+                    "PID {} has PPID 1, has run for {}, and listens on {} ({:?}).",
                     process.pid,
                     format_duration(process.elapsed_seconds),
-                    listener.endpoint
+                    listener.endpoint,
+                    listener.exposure
                 ),
                 evidence: vec![
                     format!("service_signature={service}"),
-                    process.command.clone(),
-                    listener.endpoint.clone(),
+                    format!("pid={}", process.pid),
+                    format!("ppid={}", process.ppid),
+                    format!("pgid={}", process.pgid),
+                    format!("uid={}", process.uid),
+                    format!("port={}", listener.port.unwrap_or_default()),
+                    format!("exposure={:?}", listener.exposure),
+                    format!("command={}", process.command),
+                    format!("endpoint={}", listener.endpoint),
                 ],
             });
         }
@@ -1253,7 +1397,12 @@ pub fn detect_hygiene_findings(
             evidence: detached_browsers
                 .iter()
                 .take(12)
-                .map(|process| format!("pid={} {}", process.pid, process.command))
+                .map(|process| {
+                    format!(
+                        "pid={} ppid={} pgid={} uid={} command={}",
+                        process.pid, process.ppid, process.pgid, process.uid, process.command
+                    )
+                })
                 .collect(),
         });
     }
@@ -1277,12 +1426,23 @@ pub fn detect_hygiene_findings(
             evidence: zombies
                 .iter()
                 .map(|process| {
+                    let parent = runtime
+                        .processes
+                        .iter()
+                        .find(|parent| parent.pid == process.ppid);
                     format!(
-                        "pid={} ppid={} age={} command={}",
+                        "pid={} ppid={} pgid={} uid={} parent_uid={} recommended_target_pid={} age={} command={} parent_command={}",
                         process.pid,
                         process.ppid,
+                        process.pgid,
+                        process.uid,
+                        parent.map(|parent| parent.uid).unwrap_or_default(),
+                        parent.map(|parent| parent.pid).unwrap_or(process.ppid),
                         format_duration(process.elapsed_seconds),
-                        process.command
+                        process.command,
+                        parent
+                            .map(|parent| parent.command.as_str())
+                            .unwrap_or("<parent unavailable>")
                     )
                 })
                 .collect(),

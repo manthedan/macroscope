@@ -2,6 +2,21 @@
 
 All notable changes to Macroscope will be documented in this file.
 
+## [0.3.0] - 2026-07-14
+
+### Added
+
+- Listener exposure classification for loopback, LAN, Tailscale, wildcard, public, and unknown bindings.
+- Focused `explain --port`, `explain --pid`, and `graph --finding` investigation workflows.
+- Managed named snapshots, `history`, and `diff --since` under the user state directory.
+- Exact approval-gated launchctl and process remediation argv with structured preconditions, undo, and verification.
+- Process-group and parent-command evidence for zombie findings.
+
+### Changed
+
+- Report schema is now version 4 and action-plan schema is version 3.
+- Intel-only app findings are informational and collapsed in default terminal output while remaining available in JSON and Markdown.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added

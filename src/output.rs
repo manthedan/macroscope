@@ -182,7 +182,24 @@ pub fn print_summary(report: &Report) {
     if report.findings.is_empty() {
         println!("  {}", "No notable findings. Nice.".green());
     } else {
-        for finding in &report.findings {
+        let intel_app_findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.id.starts_with("intel-app:"))
+            .count();
+        if intel_app_findings > 0 {
+            println!(
+                "  {} {} {}",
+                severity_badge(&Severity::Info),
+                "Architecture".dimmed(),
+                format!("{intel_app_findings} Intel-only app executables (collapsed; use Markdown/JSON for details)").bold()
+            );
+        }
+        for finding in report
+            .findings
+            .iter()
+            .filter(|finding| !finding.id.starts_with("intel-app:"))
+        {
             println!(
                 "  {} {} {}",
                 severity_badge(&finding.severity),
@@ -283,25 +300,11 @@ pub fn print_app_report(report: &Report) {
     println!("{}", "Applications".bold());
 
     if !intel_apps.is_empty() {
-        let mut table = Table::new();
-        table.load_preset(UTF8_FULL).set_header(vec![
-            Cell::new("App"),
-            Cell::new("Version"),
-            Cell::new("Arch"),
-            Cell::new("Bundle ID"),
-            Cell::new("Path"),
-        ]);
-        for app in intel_apps.into_iter().take(12) {
-            table.add_row(vec![
-                Cell::new(app.name.as_deref().unwrap_or("unknown")),
-                Cell::new(app.version.as_deref().unwrap_or("unknown")),
-                Cell::new(app.executable_arch.as_deref().unwrap_or("unknown")),
-                Cell::new(app.bundle_id.as_deref().unwrap_or("unknown")),
-                Cell::new(app.path.display()),
-            ]);
-        }
-        println!("{}", "Intel-only app executables".yellow().bold());
-        println!("{table}");
+        println!(
+            "{} {} (details available in Markdown/JSON or with `explain`)",
+            "Intel-only app executables:".yellow().bold(),
+            intel_apps.len()
+        );
     }
 
     if !report.apps.duplicate_bundle_ids.is_empty() {
@@ -413,6 +416,286 @@ pub fn print_explanation(target: &str, report: &Report, plan: &ActionPlan) {
         "Try a full path, action ID from `macroscope plan`, app bundle ID, or text from a finding."
             .dimmed()
     );
+}
+
+pub fn print_port_explanation(port: u16, report: &Report, plan: &ActionPlan) {
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Explain".bright_cyan().bold()
+    );
+    println!("{} {}", "Port:".bold(), port);
+    let listeners: Vec<&ListenerEntry> = report
+        .runtime
+        .listeners
+        .iter()
+        .filter(|listener| listener.port == Some(port))
+        .collect();
+    let listener_errors: Vec<&String> = report
+        .runtime
+        .errors
+        .iter()
+        .filter(|error| error.to_ascii_lowercase().contains("lsof"))
+        .collect();
+    if !listener_errors.is_empty() {
+        println!(
+            "{}",
+            "Listener results may be partial because collection failed:".red()
+        );
+        for error in &listener_errors {
+            println!("  - {error}");
+        }
+    }
+    if listeners.is_empty() {
+        if listener_errors.is_empty() {
+            println!("{}", "No current TCP listener found.".yellow());
+        } else {
+            println!("{}", "No conclusive listener result is available.".yellow());
+        }
+        return;
+    }
+    let missing_process_evidence = listeners.iter().any(|listener| {
+        !report
+            .runtime
+            .processes
+            .iter()
+            .any(|process| process.pid == listener.pid)
+    });
+    if missing_process_evidence {
+        let process_errors: Vec<&String> = report
+            .runtime
+            .errors
+            .iter()
+            .filter(|error| {
+                let lower = error.to_ascii_lowercase();
+                lower.starts_with("ps failed") || lower.starts_with("failed to run ps")
+            })
+            .collect();
+        if process_errors.is_empty() {
+            println!(
+                "{}",
+                "Some listener PIDs are absent from the process snapshot; process details are incomplete."
+                    .yellow()
+            );
+        } else {
+            println!(
+                "{}",
+                "Process details are inconclusive because collection failed:".red()
+            );
+            for error in process_errors {
+                println!("  - {error}");
+            }
+        }
+    }
+    for listener in listeners {
+        println!(
+            "\nListener {} ({:?}) — PID {}",
+            listener.endpoint, listener.exposure, listener.pid
+        );
+        if let Some(process) = report
+            .runtime
+            .processes
+            .iter()
+            .find(|process| process.pid == listener.pid)
+        {
+            print_process_evidence(process, report);
+        }
+    }
+    print_related_runtime_findings(report, plan, Some(port), None);
+}
+
+pub fn print_pid_explanation(pid: u32, report: &Report, plan: &ActionPlan) {
+    println!(
+        "{} {}",
+        "◉".bright_cyan().bold(),
+        "Macroscope Explain".bright_cyan().bold()
+    );
+    println!("{} {}", "PID:".bold(), pid);
+    let Some(process) = report
+        .runtime
+        .processes
+        .iter()
+        .find(|process| process.pid == pid)
+    else {
+        let process_errors: Vec<&String> = report
+            .runtime
+            .errors
+            .iter()
+            .filter(|error| {
+                let lower = error.to_ascii_lowercase();
+                lower.starts_with("ps failed") || lower.starts_with("failed to run ps")
+            })
+            .collect();
+        if process_errors.is_empty() {
+            println!("{}", "PID is not present in the process snapshot.".yellow());
+        } else {
+            println!(
+                "{}",
+                "PID status is inconclusive because process collection failed:".red()
+            );
+            for error in process_errors {
+                println!("  - {error}");
+            }
+        }
+        let listener_errors: Vec<&String> = report
+            .runtime
+            .errors
+            .iter()
+            .filter(|error| error.to_ascii_lowercase().contains("lsof"))
+            .collect();
+        for error in &listener_errors {
+            println!("  Listener evidence may be partial: {error}");
+        }
+        for listener in report
+            .runtime
+            .listeners
+            .iter()
+            .filter(|listener| listener.pid == pid)
+        {
+            println!(
+                "  lsof listener evidence: {} ({:?})",
+                listener.endpoint, listener.exposure
+            );
+        }
+        return;
+    };
+    print_process_evidence(process, report);
+    let listener_errors: Vec<&String> = report
+        .runtime
+        .errors
+        .iter()
+        .filter(|error| error.to_ascii_lowercase().contains("lsof"))
+        .collect();
+    if !listener_errors.is_empty() {
+        println!(
+            "{}",
+            "Listener results may be partial because collection failed:".red()
+        );
+        for error in listener_errors {
+            println!("  - {error}");
+        }
+    }
+    for listener in report
+        .runtime
+        .listeners
+        .iter()
+        .filter(|item| item.pid == pid)
+    {
+        println!(
+            "  Listener: {} ({:?})",
+            listener.endpoint, listener.exposure
+        );
+    }
+    print_related_runtime_findings(report, plan, None, Some(pid));
+}
+
+fn print_process_evidence(process: &ProcessEntry, report: &Report) {
+    println!("  Command: {}", process.command);
+    println!(
+        "  PPID / PGID / UID / age: {} / {} / {} / {}s",
+        process.ppid, process.pgid, process.uid, process.elapsed_seconds
+    );
+    if let Some(parent) = report
+        .runtime
+        .processes
+        .iter()
+        .find(|parent| parent.pid == process.ppid)
+    {
+        println!("  Parent: PID {} — {}", parent.pid, parent.command);
+    }
+    for item in report.persistence.launch_items.iter().filter(|item| {
+        crate::hygiene::process_matches_launch_item(
+            item,
+            &process.command,
+            process.executable.as_deref(),
+        )
+    }) {
+        println!(
+            "  launchd owner: {} ({:?}) — {}",
+            item.label,
+            item.scope,
+            item.path.display()
+        );
+    }
+}
+
+fn trusted_evidence_marker(evidence: &str, markers: &[String]) -> bool {
+    if !evidence
+        .split_whitespace()
+        .any(|field| field.starts_with("command="))
+    {
+        return markers.iter().any(|marker| evidence == marker);
+    }
+    evidence
+        .split_whitespace()
+        .take_while(|field| !field.starts_with("command=") && !field.starts_with("parent_command="))
+        .any(|field| markers.iter().any(|marker| field == marker))
+}
+
+fn print_related_runtime_findings(
+    report: &Report,
+    plan: &ActionPlan,
+    port: Option<u16>,
+    pid: Option<u32>,
+) {
+    let port_marker = port.map(|port| format!("port={port}"));
+    let pid_markers = pid.map(|pid| {
+        [
+            format!("pid={pid}"),
+            format!("ppid={pid}"),
+            format!("recommended_target_pid={pid}"),
+        ]
+    });
+    let findings: Vec<&Finding> = report
+        .findings
+        .iter()
+        .chain(report.suppressed_findings.iter().map(|item| &item.finding))
+        .filter(|finding| {
+            finding.evidence.iter().any(|evidence| {
+                port_marker.as_ref().is_some_and(|marker| {
+                    trusted_evidence_marker(evidence, std::slice::from_ref(marker))
+                }) || pid_markers
+                    .as_ref()
+                    .is_some_and(|markers| trusted_evidence_marker(evidence, markers))
+            }) || pid.is_some_and(|pid| plan_finding_targets_pid(plan, &finding.id, pid))
+        })
+        .collect();
+    if findings.is_empty() {
+        return;
+    }
+    println!("\n{}", "Related findings".bold());
+    for finding in findings {
+        println!(
+            "  {:?}: {} ({})",
+            finding.severity, finding.title, finding.id
+        );
+        print_related_actions(&finding.id, plan);
+    }
+}
+
+fn plan_finding_targets_pid(plan: &ActionPlan, finding_id: &str, pid: u32) -> bool {
+    plan.actions.iter().any(|action| {
+        action.controls.source_finding_id.as_deref() == Some(finding_id)
+            && (action
+                .controls
+                .preconditions
+                .iter()
+                .any(|check| match &check.kind {
+                    ActionCheckKind::ProcessMatches { pid: target, .. }
+                    | ActionCheckKind::ListenerPresent { pid: target, .. } => *target == pid,
+                    ActionCheckKind::ZombieParent { parent_pid, .. } => *parent_pid == pid,
+                    _ => false,
+                })
+                || action.controls.recommended_steps.iter().any(|step| {
+                    step.command.as_ref().is_some_and(|command| {
+                        command.program == "/bin/kill"
+                            && command
+                                .args
+                                .last()
+                                .is_some_and(|target| target == &pid.to_string())
+                    })
+                }))
+    })
 }
 
 pub fn explain_path_target(path: &Path, report: &Report, plan: &ActionPlan) {

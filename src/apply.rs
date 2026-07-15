@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::plan::{generate_action_plan, summarize_actions};
+use crate::plan::{display_command, generate_action_plan, summarize_actions};
 use crate::scan::scan;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
@@ -109,6 +109,12 @@ pub fn print_apply_preview(action: &PlannedAction, dry_run: bool) {
     for precondition in &action.controls.preconditions {
         println!("  Precondition: {}", precondition.description);
     }
+    for step in &action.controls.recommended_steps {
+        println!("  Reviewed step: {}", step.description);
+        if let Some(command) = &step.command {
+            println!("    Structured argv: {}", display_command(command));
+        }
+    }
     for verification in &action.controls.verification {
         println!("  Verify: {}", verification.description);
     }
@@ -138,7 +144,7 @@ pub fn print_apply_preview(action: &PlannedAction, dry_run: bool) {
 }
 
 pub fn validate_action_plan(plan: &ActionPlan) -> Result<()> {
-    if plan.schema_version != 2 {
+    if plan.schema_version != 3 {
         anyhow::bail!("unsupported action-plan schema {}", plan.schema_version);
     }
     let expected_summary = summarize_actions(&plan.actions);

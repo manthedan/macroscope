@@ -3,16 +3,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use macroscope::{
     apply::{apply_action_plan, dry_run_action_plan, load_or_generate_plan},
     brief::render_brief,
-    correlation::print_correlation_graph,
+    correlation::{focused_correlation_graph, print_correlation_graph},
     decisions::{clear_decision, load_decisions, record_decision},
     guide::{GuideOptions, run_guide},
     markdown::render_markdown,
     model::DecisionKind,
-    output::{print_explanation, print_summary},
+    output::{print_explanation, print_pid_explanation, print_port_explanation, print_summary},
     plan::{generate_action_plan, print_action_plan, render_action_plan_markdown},
     scan::{scan, scan_with_cli_progress},
     snapshot::{
-        diff_reports, load_snapshot, print_diff, print_verification, save_snapshot, verify_reports,
+        diff_reports, list_managed_snapshots, load_snapshot, managed_snapshot_path, print_diff,
+        print_verification, save_managed_snapshot, save_snapshot, verify_reports,
     },
 };
 use std::fs;
@@ -42,17 +43,32 @@ enum Commands {
 
     /// Save a versioned evidence snapshot for later diff or verification.
     Snapshot {
-        /// Snapshot JSON output path.
-        output: PathBuf,
+        /// Snapshot JSON output path. Omit to use managed snapshot storage.
+        output: Option<PathBuf>,
+
+        /// Stable name in the managed snapshot store.
+        #[arg(long, conflicts_with = "output")]
+        name: Option<String>,
+    },
+
+    /// List snapshots in the managed snapshot store.
+    History {
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Compare two snapshots, or a snapshot with a fresh live scan.
     Diff {
-        /// Baseline snapshot.
-        before: PathBuf,
+        /// Baseline snapshot path.
+        before: Option<PathBuf>,
 
         /// Optional second snapshot; omit to scan the current Mac.
         after: Option<PathBuf>,
+
+        /// Baseline name from `macroscope history`.
+        #[arg(long, conflicts_with = "before")]
+        since: Option<String>,
 
         /// Emit JSON instead of text.
         #[arg(long)]
@@ -82,6 +98,10 @@ enum Commands {
         /// Emit JSON instead of text.
         #[arg(long)]
         json: bool,
+
+        /// Restrict the graph to evidence connected to this finding ID.
+        #[arg(long)]
+        finding: Option<String>,
     },
 
     /// Record a keep, ignore, or snooze decision for a stable finding ID.
@@ -122,7 +142,15 @@ enum Commands {
     /// Explain a path, action ID, bundle ID, or finding text.
     Explain {
         /// Path, action ID, bundle ID, or text to explain.
-        target: String,
+        target: Option<String>,
+
+        /// Explain the process and listener attached to a TCP port.
+        #[arg(long, conflicts_with_all = ["target", "pid"])]
+        port: Option<u16>,
+
+        /// Explain a process, its parent, listeners, and launchd owner.
+        #[arg(long, conflicts_with_all = ["target", "port"])]
+        pid: Option<u32>,
     },
 
     /// Generate an AI/human handoff brief.
@@ -212,17 +240,58 @@ fn main() -> Result<()> {
                 print_summary(&report);
             }
         }
-        Commands::Snapshot { output } => {
+        Commands::Snapshot { output, name } => {
             let report = scan_with_cli_progress("Capturing evidence snapshot");
-            save_snapshot(&output, &report)?;
+            let output = if let Some(output) = output {
+                save_snapshot(&output, &report)?;
+                output
+            } else {
+                save_managed_snapshot(name.as_deref(), &report)?
+            };
             println!("Wrote {}", output.display());
+        }
+        Commands::History { json } => {
+            let history = list_managed_snapshots()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+            } else if history.is_empty() {
+                println!("No managed snapshots.");
+            } else {
+                for snapshot in history {
+                    println!(
+                        "{}\t{}\t{} findings\t{} risk\t{} warn{}",
+                        snapshot.name,
+                        snapshot
+                            .collected_at_unix
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "invalid".into()),
+                        snapshot.findings.unwrap_or_default(),
+                        snapshot.risks.unwrap_or_default(),
+                        snapshot.warnings.unwrap_or_default(),
+                        snapshot
+                            .error
+                            .as_deref()
+                            .map(|error| format!("\t{error}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
         Commands::Diff {
             before,
             after,
+            since,
             json,
         } => {
-            let before = load_snapshot(&before)?;
+            let before_path = match (before, since) {
+                (Some(path), None) => path,
+                (None, Some(name)) => managed_snapshot_path(&name)?,
+                (None, None) => {
+                    anyhow::bail!("provide a baseline path or use `macroscope diff --since <name>`")
+                }
+                (Some(_), Some(_)) => unreachable!("clap rejects conflicting baselines"),
+            };
+            let before = load_snapshot(&before_path)?;
             let after = if let Some(path) = after {
                 load_snapshot(&path)?
             } else if json {
@@ -265,16 +334,22 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Commands::Graph { json } => {
+        Commands::Graph { json, finding } => {
             let report = if json {
                 scan()
             } else {
                 scan_with_cli_progress("Building correlation graph")
             };
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report.correlations)?);
+            let graph = if let Some(finding_id) = finding {
+                focused_correlation_graph(&report, &finding_id)
+                    .with_context(|| format!("finding `{finding_id}` is not present"))?
             } else {
-                print_correlation_graph(&report.correlations);
+                report.correlations.clone()
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&graph)?);
+            } else {
+                print_correlation_graph(&graph);
             }
         }
         Commands::Decide {
@@ -332,10 +407,18 @@ fn main() -> Result<()> {
                 print_action_plan(&plan);
             }
         }
-        Commands::Explain { target } => {
+        Commands::Explain { target, port, pid } => {
             let report = scan_with_cli_progress("Scanning before explanation");
             let plan = generate_action_plan(&report);
-            print_explanation(&target, &report, &plan);
+            match (target, port, pid) {
+                (Some(target), None, None) => print_explanation(&target, &report, &plan),
+                (None, Some(port), None) => print_port_explanation(port, &report, &plan),
+                (None, None, Some(pid)) => print_pid_explanation(pid, &report, &plan),
+                (None, None, None) => {
+                    anyhow::bail!("provide a target, `--port <port>`, or `--pid <pid>`")
+                }
+                _ => unreachable!("clap rejects conflicting explanation targets"),
+            }
         }
         Commands::Brief {
             markdown,

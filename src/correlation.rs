@@ -189,6 +189,7 @@ fn connect_process_listeners(
             [
                 ("pid", pid.to_string()),
                 ("wildcard", listener.wildcard.to_string()),
+                ("exposure", format!("{:?}", listener.exposure)),
             ],
         );
         add_edge(
@@ -341,6 +342,8 @@ fn process_node(nodes: &mut BTreeMap<String, EvidenceNode>, process: &ProcessEnt
                     .unwrap_or_default(),
             ),
             ("ppid", process.ppid.to_string()),
+            ("pgid", process.pgid.to_string()),
+            ("uid", process.uid.to_string()),
             ("elapsed_seconds", process.elapsed_seconds.to_string()),
         ],
     );
@@ -396,6 +399,182 @@ fn add_node<const N: usize>(
     });
 }
 
+pub fn focused_correlation_graph(report: &Report, finding_id: &str) -> Option<CorrelationGraph> {
+    let finding = report
+        .findings
+        .iter()
+        .chain(report.suppressed_findings.iter().map(|item| &item.finding))
+        .find(|finding| finding.id == finding_id)?;
+    let mut nodes: BTreeMap<String, EvidenceNode> = report
+        .correlations
+        .nodes
+        .iter()
+        .cloned()
+        .map(|node| (node.id.clone(), node))
+        .collect();
+    let mut edges = report.correlations.edges.clone();
+    let mut edge_keys: BTreeSet<String> = edges
+        .iter()
+        .map(|edge| format!("{}\0{}\0{}", edge.from, edge.relation, edge.to))
+        .collect();
+    let mut process_pids = BTreeSet::new();
+    if finding.id == "detached-agent-browser-processes" {
+        process_pids.extend(
+            report
+                .runtime
+                .processes
+                .iter()
+                .filter(|process| {
+                    process.ppid == 1
+                        && process.elapsed_seconds >= 6 * 60 * 60
+                        && (process.command.contains("/.agent-browser/browsers/")
+                            || process.command.contains("agent-browser-darwin"))
+                })
+                .map(|process| process.pid),
+        );
+    } else if finding.id == "zombie-processes" {
+        for process in report
+            .runtime
+            .processes
+            .iter()
+            .filter(|process| process.state.contains('Z'))
+        {
+            process_pids.insert(process.pid);
+            process_pids.insert(process.ppid);
+        }
+    }
+    let mut seeds = BTreeSet::new();
+    for prefix in [
+        "persistent-launch-item:",
+        "translocated-launch-item:",
+        "orphaned-privileged-helper:",
+    ] {
+        if let Some(identity) = finding.id.strip_prefix(prefix) {
+            seeds.insert(format!("launch:{identity}"));
+        }
+    }
+    for evidence in &finding.evidence {
+        if let Some(pid) = trusted_evidence_pid(evidence) {
+            process_pids.insert(pid);
+        }
+    }
+    for pid in process_pids {
+        let Some(process) = report
+            .runtime
+            .processes
+            .iter()
+            .find(|process| process.pid == pid)
+        else {
+            continue;
+        };
+        let process_id = process_node(&mut nodes, process);
+        seeds.insert(process_id.clone());
+        connect_process_listeners(
+            &mut nodes,
+            &mut edges,
+            &mut edge_keys,
+            &process_id,
+            process.pid,
+            &report.runtime,
+        );
+        if let Some(parent) = report
+            .runtime
+            .processes
+            .iter()
+            .find(|parent| parent.pid == process.ppid)
+        {
+            let parent_id = process_node(&mut nodes, parent);
+            add_edge(
+                &mut edges,
+                &mut edge_keys,
+                &process_id,
+                &parent_id,
+                "child-of",
+                Confidence::High,
+            );
+        }
+    }
+    for evidence in &finding.evidence {
+        for node in nodes.values() {
+            if node.label == *evidence
+                || node.attributes.values().any(|value| value == evidence)
+                || (evidence.starts_with('/')
+                    && node
+                        .attributes
+                        .values()
+                        .any(|value| value.contains(evidence)))
+            {
+                seeds.insert(node.id.clone());
+            }
+        }
+    }
+    if let Some(path) = finding.id.strip_prefix("intel-app:") {
+        if let Some(app) = report
+            .apps
+            .apps
+            .iter()
+            .find(|app| app.path.to_string_lossy() == path)
+        {
+            seeds.insert(app_node(&mut nodes, app));
+        }
+        for node in nodes.values() {
+            if node
+                .attributes
+                .get("path")
+                .is_some_and(|value| value == path)
+            {
+                seeds.insert(node.id.clone());
+            }
+        }
+    }
+
+    let graph = CorrelationGraph {
+        nodes: nodes.into_values().collect(),
+        edges,
+    };
+    let mut selected = seeds;
+    for _ in 0..4 {
+        let mut next = selected.clone();
+        for edge in &graph.edges {
+            if selected.contains(&edge.from) || selected.contains(&edge.to) {
+                next.insert(edge.from.clone());
+                next.insert(edge.to.clone());
+            }
+        }
+        if next == selected {
+            break;
+        }
+        selected = next;
+    }
+    Some(CorrelationGraph {
+        nodes: graph
+            .nodes
+            .into_iter()
+            .filter(|node| selected.contains(&node.id))
+            .collect(),
+        edges: graph
+            .edges
+            .into_iter()
+            .filter(|edge| selected.contains(&edge.from) && selected.contains(&edge.to))
+            .collect(),
+    })
+}
+
+fn trusted_evidence_pid(evidence: &str) -> Option<u32> {
+    if !evidence
+        .split_whitespace()
+        .any(|field| field.starts_with("command="))
+    {
+        return evidence.strip_prefix("pid=")?.parse().ok();
+    }
+    evidence
+        .split_whitespace()
+        .take_while(|field| !field.starts_with("command="))
+        .find_map(|field| field.strip_prefix("pid="))?
+        .parse()
+        .ok()
+}
+
 pub fn print_correlation_graph(graph: &CorrelationGraph) {
     println!(
         "Macroscope correlation graph: {} nodes, {} edges",
@@ -407,13 +586,17 @@ pub fn print_correlation_graph(graph: &CorrelationGraph) {
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect();
-    for launch in graph
+    let incoming: BTreeSet<&str> = graph.edges.iter().map(|edge| edge.to.as_str()).collect();
+    let roots: Vec<&EvidenceNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == EvidenceNodeKind::LaunchItem)
-    {
-        println!("\n{}", launch.label);
-        print_edges(graph, &nodes, &launch.id, 1, &mut BTreeSet::new());
+        .filter(|node| {
+            node.kind == EvidenceNodeKind::LaunchItem || !incoming.contains(node.id.as_str())
+        })
+        .collect();
+    for root in roots {
+        println!("\n{:?}: {}", root.kind, root.label);
+        print_edges(graph, &nodes, &root.id, 1, &mut BTreeSet::new());
     }
 }
 

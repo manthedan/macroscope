@@ -22,13 +22,16 @@ The binary is the deterministic sensor and guarded executor. The Agent Skill sup
 - [x] Add `snapshot`, `diff`, and explicit before/after verification commands
 - [x] Record collection timestamp, host-independent schema version, collector errors, and evidence provenance
 - Add last-opened/modified time, size, code signing, quarantine, and package receipts
-- Group repeated architecture findings into actionable families
+- [x] Collapse repeated architecture findings in default output while retaining full structured evidence
+- [x] Add managed named snapshots, history, and `diff --since`
+- [x] Classify listener exposure across loopback, LAN, Tailscale, wildcard, and public bindings
 
 ### Phase 3 — guarded remediation contracts
 
 - [x] Add action preconditions, exact argv, root requirement, undo guidance, and verification checks
 - [x] Reject protected/arbitrary paths in externally supplied plans
-- Generate reviewable administrator scripts without handling passwords
+- [x] Generate exact approval-gated launchctl/process steps with structured preconditions and undo
+- Generate multi-step reviewable administrator scripts without handling passwords
 - [x] Add keep/ignore/snooze decisions so known-good services stop resurfacing
 - Keep vendor uninstallers and package-manager operations ahead of direct deletion
 

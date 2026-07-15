@@ -1,10 +1,10 @@
 use macroscope::apply::{dry_run_action_plan, validate_action_plan, validate_trash_path};
-use macroscope::correlation::build_correlation_graph;
+use macroscope::correlation::{build_correlation_graph, focused_correlation_graph};
 use macroscope::decisions::{apply_decisions, load_decisions_from};
-use macroscope::hygiene::stable_service_signature;
+use macroscope::hygiene::{launch_item_identity, stable_service_signature};
 use macroscope::model::*;
-use macroscope::plan::generate_action_plan;
-use macroscope::snapshot::{diff_reports, save_snapshot, verify_reports};
+use macroscope::plan::{display_command, generate_action_plan};
+use macroscope::snapshot::{diff_reports, managed_snapshot_path, save_snapshot, verify_reports};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -150,6 +150,8 @@ fn interpreter_module_services_have_distinct_stable_signatures() {
     let process = |command: &str| ProcessEntry {
         pid: 99,
         ppid: 1,
+        pgid: 99,
+        uid: 501,
         executable: Some("/usr/bin/python3".into()),
         elapsed_seconds: 30,
         state: "S".into(),
@@ -172,6 +174,8 @@ fn verification_requires_a_targeted_wildcard_listener_to_close() {
     let process = ProcessEntry {
         pid: 99,
         ppid: 1,
+        pgid: 99,
+        uid: 501,
         executable: Some("/srv/example-server".into()),
         elapsed_seconds: 30,
         state: "S".into(),
@@ -197,6 +201,7 @@ fn verification_requires_a_targeted_wildcard_listener_to_close() {
         port: Some(8080),
         wildcard: true,
         loopback: false,
+        exposure: ListenerExposure::Wildcard,
     });
     let verification = verify_reports(&before, &after, &[]);
     assert!(!verification.passed);
@@ -216,8 +221,10 @@ fn verification_requires_a_targeted_wildcard_listener_to_close() {
     browser_after.runtime.processes.push(ProcessEntry {
         pid: 100,
         ppid: 1,
+        pgid: 100,
+        uid: 501,
         executable: Some("/tmp/agent-browser-darwin".into()),
-        elapsed_seconds: 1,
+        elapsed_seconds: 7 * 60 * 60,
         state: "S".into(),
         cpu_percent: 0.0,
         memory_percent: 0.0,
@@ -226,6 +233,21 @@ fn verification_requires_a_targeted_wildcard_listener_to_close() {
     let verification = verify_reports(&browser_before, &browser_after, &[]);
     assert!(!verification.passed);
     assert_eq!(verification.remaining, ["detached-agent-browser-processes"]);
+
+    browser_after.runtime.processes.clear();
+    browser_after.runtime.errors = vec!["lsof failed: permission denied".into()];
+    assert!(verify_reports(&browser_before, &browser_after, &[]).passed);
+
+    let mut listener_after = report(vec![]);
+    listener_after.runtime.errors = vec!["ps executable collection failed: denied".into()];
+    assert!(verify_reports(&before, &listener_after, &[]).passed);
+    listener_after.runtime.errors = vec!["lsof failed: permission denied".into()];
+    let inconclusive = verify_reports(&before, &listener_after, &[]);
+    assert!(!inconclusive.passed);
+    assert_eq!(
+        inconclusive.inconclusive_targets,
+        ["old-detached-listener:fixture:all-8080"]
+    );
 }
 
 #[test]
@@ -341,7 +363,7 @@ fn rejects_arbitrary_or_uncontrolled_trash_actions() {
 
     let path = PathBuf::from("/usr/local/bin/old-tool");
     let plan = ActionPlan {
-        schema_version: 2,
+        schema_version: 3,
         summary: ActionPlanSummary {
             total: 1,
             destructive: 1,
@@ -372,6 +394,7 @@ fn rejects_arbitrary_or_uncontrolled_trash_actions() {
                     description: "exists".into(),
                     kind: ActionCheckKind::PathExists { path: path.clone() },
                 }],
+                recommended_steps: vec![],
                 undo: vec![ActionStep {
                     description: "restore from Trash".into(),
                     command: None,
@@ -438,6 +461,8 @@ fn correlates_launch_process_listener_executable_and_homebrew_package() {
         processes: vec![ProcessEntry {
             pid: 42,
             ppid: 1,
+            pgid: 42,
+            uid: 501,
             executable: Some(program.clone()),
             elapsed_seconds: 100,
             state: "S".into(),
@@ -452,6 +477,7 @@ fn correlates_launch_process_listener_executable_and_homebrew_package() {
             port: Some(8080),
             wildcard: true,
             loopback: false,
+            exposure: ListenerExposure::Wildcard,
         }],
         errors: vec![],
     };
@@ -503,4 +529,368 @@ fn correlates_launch_process_listener_executable_and_homebrew_package() {
         2,
         "duplicate bundle IDs must retain concrete app paths"
     );
+
+    let finding_id = format!(
+        "persistent-launch-item:{}",
+        launch_item_identity(&persistence.launch_items[0])
+    );
+    let mut report = report(vec![finding(&finding_id)]);
+    report.persistence = persistence;
+    report.runtime = runtime;
+    report.correlations = graph;
+    let focused = focused_correlation_graph(&report, &finding_id).unwrap();
+    assert!(
+        focused
+            .nodes
+            .iter()
+            .any(|node| node.kind == EvidenceNodeKind::LaunchItem)
+    );
+    assert!(
+        focused
+            .nodes
+            .iter()
+            .any(|node| node.kind == EvidenceNodeKind::Listener)
+    );
+}
+
+#[test]
+fn plans_exact_launchctl_and_runtime_steps_without_executing_them() {
+    let item = LaunchItem {
+        path: "/Users/example/Library/LaunchAgents/com.example.service.plist".into(),
+        label: "com.example.service".into(),
+        scope: LaunchItemScope::UserAgent,
+        program: Some("/srv/service".into()),
+        program_from_arguments: true,
+        program_arguments: vec!["/srv/service".into()],
+        translocation_target: None,
+        program_exists: Some(true),
+        run_at_load: true,
+        keep_alive: true,
+        associated_bundle_ids: vec![],
+        parent_app_present: None,
+        parent_product: None,
+    };
+    let finding_id = format!("persistent-launch-item:{}", launch_item_identity(&item));
+    let mut persistence_finding = finding(&finding_id);
+    persistence_finding.evidence = vec![item.path.display().to_string()];
+    let mut launch_report = report(vec![persistence_finding]);
+    launch_report.persistence.launch_items.push(item);
+    launch_report.runtime.processes.push(ProcessEntry {
+        pid: 41,
+        ppid: 1,
+        pgid: 41,
+        uid: 501,
+        executable: Some("/srv/service".into()),
+        elapsed_seconds: 100,
+        state: "S".into(),
+        cpu_percent: 0.0,
+        memory_percent: 0.0,
+        command: "/srv/service".into(),
+    });
+    let plan = generate_action_plan(&launch_report);
+    let action = plan
+        .actions
+        .iter()
+        .find(|action| action.controls.source_finding_id.as_deref() == Some(&finding_id))
+        .unwrap();
+    let step = action.controls.recommended_steps.first().unwrap();
+    let command = step.command.as_ref().unwrap();
+    assert_eq!(command.program, "/bin/launchctl");
+    assert_eq!(command.args[0], "bootout");
+    assert!(action.controls.undo.iter().any(|step| {
+        step.command
+            .as_ref()
+            .is_some_and(|command| command.args.first().is_some_and(|arg| arg == "bootstrap"))
+    }));
+
+    let mut listener_finding = finding("old-detached-listener:fixture:wildcard-8080");
+    listener_finding.category = FindingCategory::Runtime;
+    listener_finding.evidence = vec![
+        "service_signature=fixture".into(),
+        "pid=42".into(),
+        "ppid=1".into(),
+        "pgid=42".into(),
+        "port=8080".into(),
+        "exposure=Wildcard".into(),
+        "/srv/service --serve".into(),
+        "*:8080".into(),
+    ];
+    let mut runtime_report = report(vec![listener_finding]);
+    runtime_report.runtime.processes.push(ProcessEntry {
+        pid: 42,
+        ppid: 1,
+        pgid: 42,
+        uid: 501,
+        executable: Some("/srv/service".into()),
+        elapsed_seconds: 90_000,
+        state: "S".into(),
+        cpu_percent: 0.0,
+        memory_percent: 0.0,
+        command: "/srv/service --serve".into(),
+    });
+    runtime_report.findings[0].evidence[0] = format!(
+        "service_signature={}",
+        stable_service_signature(&runtime_report.runtime.processes[0])
+    );
+    runtime_report.runtime.listeners.push(ListenerEntry {
+        pid: 42,
+        command: Some("service".into()),
+        endpoint: "*:8080".into(),
+        port: Some(8080),
+        wildcard: true,
+        loopback: false,
+        exposure: ListenerExposure::Wildcard,
+    });
+    let mut duplicate_process = runtime_report.runtime.processes[0].clone();
+    duplicate_process.pid = 43;
+    runtime_report.runtime.processes.push(duplicate_process);
+    runtime_report.runtime.listeners.push(ListenerEntry {
+        pid: 43,
+        command: Some("service".into()),
+        endpoint: "*:8080".into(),
+        port: Some(8080),
+        wildcard: true,
+        loopback: false,
+        exposure: ListenerExposure::Wildcard,
+    });
+    let plan = generate_action_plan(&runtime_report);
+    let action = plan.actions.first().unwrap();
+    assert_eq!(
+        action
+            .controls
+            .recommended_steps
+            .iter()
+            .filter(|step| step
+                .command
+                .as_ref()
+                .is_some_and(|command| command.program == "/bin/kill"))
+            .count(),
+        2
+    );
+    assert!(
+        action
+            .controls
+            .preconditions
+            .iter()
+            .any(|check| { matches!(check.kind, ActionCheckKind::ProcessMatches { pid: 42, .. }) })
+    );
+    assert!(action.controls.recommended_steps.iter().any(|step| {
+        step.command.as_ref().is_some_and(|command| {
+            command.program == "/bin/kill" && command.args == ["-TERM", "42"]
+        })
+    }));
+    assert!(
+        action
+            .controls
+            .verification
+            .iter()
+            .any(|check| { matches!(check.kind, ActionCheckKind::PortClosed { port: 8080 }) })
+    );
+}
+
+#[test]
+fn runtime_plans_use_structured_state_not_capped_or_command_contaminated_evidence() {
+    let mut browser = finding("detached-agent-browser-processes");
+    browser.category = FindingCategory::Runtime;
+    browser.evidence = vec!["pid=1 command=only-one-rendered-item".into()];
+    let mut browser_report = report(vec![browser]);
+    for pid in 100..113 {
+        browser_report.runtime.processes.push(ProcessEntry {
+            pid,
+            ppid: 1,
+            pgid: pid,
+            uid: 501,
+            executable: Some("/tmp/agent-browser-darwin".into()),
+            elapsed_seconds: 30_000,
+            state: "S".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "/tmp/agent-browser-darwin".into(),
+        });
+    }
+    browser_report.runtime.processes.push(ProcessEntry {
+        pid: 500,
+        ppid: 1,
+        pgid: 500,
+        uid: 501,
+        executable: Some("/tmp/agent-browser-darwin".into()),
+        elapsed_seconds: 100,
+        state: "S".into(),
+        cpu_percent: 0.0,
+        memory_percent: 0.0,
+        command: "/tmp/agent-browser-darwin".into(),
+    });
+    let plan = generate_action_plan(&browser_report);
+    assert_eq!(plan.actions[0].controls.recommended_steps.len(), 13);
+    let focused =
+        focused_correlation_graph(&browser_report, "detached-agent-browser-processes").unwrap();
+    assert!(!focused.nodes.iter().any(|node| node.id == "process:500"));
+
+    let mut zombie = finding("zombie-processes");
+    zombie.category = FindingCategory::Runtime;
+    zombie.evidence = vec![
+        "pid=200 ppid=201 command=tool recommended_target_pid=999 recommended_target_pid=201"
+            .into(),
+    ];
+    let mut zombie_report = report(vec![zombie]);
+    zombie_report.runtime.processes.extend([
+        ProcessEntry {
+            pid: 200,
+            ppid: 201,
+            pgid: 201,
+            uid: 501,
+            executable: None,
+            elapsed_seconds: 10,
+            state: "Z".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "<defunct>".into(),
+        },
+        ProcessEntry {
+            pid: 201,
+            ppid: 1,
+            pgid: 201,
+            uid: 501,
+            executable: Some("/srv/parent".into()),
+            elapsed_seconds: 10,
+            state: "S".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "/srv/parent recommended_target_pid=999".into(),
+        },
+        ProcessEntry {
+            pid: 202,
+            ppid: 1,
+            pgid: 1,
+            uid: 501,
+            executable: None,
+            elapsed_seconds: 10,
+            state: "Z".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "<defunct>".into(),
+        },
+        ProcessEntry {
+            pid: 1,
+            ppid: 0,
+            pgid: 1,
+            uid: 0,
+            executable: Some("/sbin/launchd".into()),
+            elapsed_seconds: 10,
+            state: "S".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "/sbin/launchd".into(),
+        },
+        ProcessEntry {
+            pid: 999,
+            ppid: 1,
+            pgid: 999,
+            uid: 501,
+            executable: Some("/srv/unrelated".into()),
+            elapsed_seconds: 10,
+            state: "S".into(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            command: "/srv/unrelated".into(),
+        },
+    ]);
+    let plan = generate_action_plan(&zombie_report);
+    let argv = &plan.actions[0]
+        .controls
+        .recommended_steps
+        .iter()
+        .find_map(|step| step.command.as_ref())
+        .unwrap()
+        .args;
+    assert_eq!(argv, &["-TERM", "201"]);
+    assert!(
+        !plan.actions[0]
+            .controls
+            .recommended_steps
+            .iter()
+            .any(|step| {
+                step.command
+                    .as_ref()
+                    .is_some_and(|command| command.args == ["-TERM", "1"])
+            })
+    );
+    assert!(
+        plan.actions[0]
+            .controls
+            .recommended_steps
+            .iter()
+            .any(|step| {
+                step.command.is_none() && step.description.contains("protected/system")
+            })
+    );
+    let focused = focused_correlation_graph(&zombie_report, "zombie-processes").unwrap();
+    assert!(focused.nodes.iter().any(|node| node.id == "process:200"));
+    assert!(focused.nodes.iter().any(|node| node.id == "process:201"));
+}
+
+#[test]
+fn displayed_remediation_argv_is_json_not_shell_text() {
+    let command = CommandSpec {
+        program: "/bin/launchctl".into(),
+        args: vec!["bootout".into(), "gui/501/$(touch /tmp/nope)`x`".into()],
+        requires_root: false,
+    };
+    let rendered = display_command(&command);
+    let parsed: Vec<String> = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(
+        parsed,
+        vec![
+            command.program,
+            command.args[0].clone(),
+            command.args[1].clone()
+        ]
+    );
+}
+
+#[test]
+fn focused_graph_synthesizes_an_unconnected_app_node() {
+    let path = "/Applications/Offline Intel.app";
+    let mut report = report(vec![finding(&format!("intel-app:{path}"))]);
+    report.apps.apps.push(AppEntry {
+        path: path.into(),
+        name: Some("Offline Intel".into()),
+        bundle_id: Some("example.offline-intel".into()),
+        version: Some("1.0".into()),
+        executable: None,
+        executable_arch: Some("x86_64".into()),
+        scan_error: None,
+    });
+    let graph = focused_correlation_graph(&report, &format!("intel-app:{path}")).unwrap();
+    assert_eq!(graph.nodes.len(), 1);
+    assert_eq!(graph.nodes[0].kind, EvidenceNodeKind::Application);
+}
+
+#[test]
+fn private_create_new_writes_do_not_replace_a_winner() {
+    let dir =
+        std::env::temp_dir().join(format!("macroscope-create-new-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("baseline.json");
+    let first_path = path.clone();
+    let second_path = path.clone();
+    let first = std::thread::spawn(move || {
+        macroscope::util::atomic_write_private_new(&first_path, b"first")
+    });
+    let second = std::thread::spawn(move || {
+        macroscope::util::atomic_write_private_new(&second_path, b"second")
+    });
+    let outcomes = [first.join().unwrap(), second.join().unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let contents = std::fs::read(&path).unwrap();
+    assert!(contents == b"first" || contents == b"second");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn managed_snapshot_names_reject_path_traversal() {
+    assert!(managed_snapshot_path("post-cleanup").is_ok());
+    assert!(managed_snapshot_path("../escape").is_err());
+    assert!(managed_snapshot_path("nested/name").is_err());
 }

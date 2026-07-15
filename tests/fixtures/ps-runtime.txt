@@ -1,4 +1,4 @@
-45098     1 03-11:34:16 S      0.0  0.0 node scripts/serve_isolated_static.mjs dist-client
-25099     1    11:00:00 S      0.0  0.2 /Users/example/.agent-browser/browsers/chrome/Google Chrome for Testing --headless=new
-28405  6194 02-10:57:48 Z      0.0  0.0 <defunct>
- 6194 43738 02-11:10:18 S+     0.0  0.1 /Users/example/.local/bin/grok
+45098     1 45098 501 03-11:34:16 S      0.0  0.0 node scripts/serve_isolated_static.mjs dist-client
+25099     1 25099 501    11:00:00 S      0.0  0.2 /Users/example/.agent-browser/browsers/chrome/Google Chrome for Testing --headless=new
+28405  6194  6194 501 02-10:57:48 Z      0.0  0.0 <defunct>
+ 6194 43738  6194 501 02-11:10:18 S+     0.0  0.1 /Users/example/.local/bin/grok

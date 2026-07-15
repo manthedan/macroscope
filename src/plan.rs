@@ -301,7 +301,7 @@ pub fn generate_action_plan(report: &Report) -> ActionPlan {
     }
     let summary = summarize_actions(&actions);
     ActionPlan {
-        schema_version: 2,
+        schema_version: 3,
         summary,
         actions,
     }
@@ -423,10 +423,12 @@ fn populate_action_controls(action: &mut PlannedAction, report: &Report) {
                     .into(),
                 command: None,
             });
-        } else if let Some(label) = finding
+        }
+        if let Some(label) = finding
             .id
             .strip_prefix("persistent-launch-item:")
             .or_else(|| finding.id.strip_prefix("translocated-launch-item:"))
+            .or_else(|| finding.id.strip_prefix("orphaned-privileged-helper:"))
             && let Some(item) = report
                 .persistence
                 .launch_items
@@ -436,35 +438,310 @@ fn populate_action_controls(action: &mut PlannedAction, report: &Report) {
             if item.path.starts_with("/Library") {
                 action.controls.requires_root = true;
             }
-            let (target, command_requires_root) = match item.scope {
+            let launch_targets: Vec<(String, String, bool)> = match item.scope {
                 LaunchItemScope::SystemDaemon => {
                     action.controls.requires_root = true;
-                    (format!("system/{}", item.label), true)
+                    vec![("system".into(), format!("system/{}", item.label), true)]
                 }
-                LaunchItemScope::UserAgent | LaunchItemScope::SystemAgent => (
-                    format!("gui/{}/{}", current_uid().unwrap_or_default(), item.label),
-                    false,
-                ),
+                LaunchItemScope::UserAgent | LaunchItemScope::SystemAgent => {
+                    let invoking_uid = current_uid().and_then(|uid| uid.parse::<u32>().ok());
+                    launch_gui_uids(item, report)
+                        .into_iter()
+                        .map(|uid| {
+                            let domain = format!("gui/{uid}");
+                            let requires_root = item.scope == LaunchItemScope::SystemAgent
+                                || invoking_uid != Some(uid);
+                            (
+                                domain.clone(),
+                                format!("{domain}/{}", item.label),
+                                requires_root,
+                            )
+                        })
+                        .collect()
+                }
             };
-            action.controls.preconditions.push(ActionCheck {
-                description: "launchd currently knows this label".into(),
-                kind: ActionCheckKind::CommandSucceeds {
-                    command: CommandSpec {
+            if launch_targets.is_empty() {
+                action.controls.recommended_steps.push(ActionStep {
+                    description: format!(
+                        "No unambiguous loaded GUI domain was found for `{}`; inspect launchctl domains and do not remove the plist until every loaded instance is stopped",
+                        item.label
+                    ),
+                    command: None,
+                });
+            }
+            for (domain, target, command_requires_root) in launch_targets {
+                action.controls.requires_root |= command_requires_root;
+                action.controls.preconditions.push(ActionCheck {
+                    description: format!("launchd currently knows `{target}`"),
+                    kind: ActionCheckKind::CommandSucceeds {
+                        command: CommandSpec {
+                            program: "/bin/launchctl".into(),
+                            args: vec!["print".into(), target.clone()],
+                            requires_root: command_requires_root,
+                        },
+                    },
+                });
+                action.controls.recommended_steps.push(ActionStep {
+                    description: format!("Boot out the exact launchd service `{target}`"),
+                    command: Some(CommandSpec {
                         program: "/bin/launchctl".into(),
-                        args: vec!["print".into(), target],
+                        args: vec!["bootout".into(), target],
                         requires_root: command_requires_root,
+                    }),
+                });
+                action.controls.undo.push(ActionStep {
+                    description: format!(
+                        "Bootstrap the retained plist at `{}` in `{domain}` again",
+                        item.path.display()
+                    ),
+                    command: Some(CommandSpec {
+                        program: "/bin/launchctl".into(),
+                        args: vec!["bootstrap".into(), domain, item.path.display().to_string()],
+                        requires_root: command_requires_root,
+                    }),
+                });
+            }
+        }
+        populate_runtime_steps(action, finding, report);
+    }
+}
+
+fn launch_gui_uids(item: &LaunchItem, report: &Report) -> BTreeSet<u32> {
+    let process_uids: BTreeSet<u32> = report
+        .runtime
+        .processes
+        .iter()
+        .filter(|process| {
+            crate::hygiene::process_matches_launch_item(
+                item,
+                &process.command,
+                process.executable.as_deref(),
+            )
+        })
+        .map(|process| process.uid)
+        .filter(|uid| *uid > 0)
+        .collect();
+    if item.scope == LaunchItemScope::SystemAgent {
+        return process_uids;
+    }
+    let owner_uid = std::fs::symlink_metadata(&item.path)
+        .ok()
+        .map(|metadata| metadata.uid())
+        .filter(|uid| *uid > 0);
+    match (owner_uid, process_uids.len()) {
+        (Some(owner), 0) => BTreeSet::from([owner]),
+        (Some(owner), 1) if process_uids.contains(&owner) => process_uids,
+        (None, 1) => process_uids,
+        _ => BTreeSet::new(),
+    }
+}
+
+fn populate_runtime_steps(action: &mut PlannedAction, finding: &Finding, report: &Report) {
+    if finding.id.starts_with("old-detached-listener:") {
+        let Some(port) =
+            evidence_number(finding, "port").and_then(|value| u16::try_from(value).ok())
+        else {
+            return;
+        };
+        let Some(service_signature) = evidence_value(finding, "service_signature") else {
+            return;
+        };
+        let Some(exposure) = evidence_value(finding, "exposure") else {
+            return;
+        };
+        let mut seen = BTreeSet::new();
+        for listener in report.runtime.listeners.iter().filter(|listener| {
+            listener.port == Some(port) && format!("{:?}", listener.exposure) == exposure
+        }) {
+            let Some(process) = report
+                .runtime
+                .processes
+                .iter()
+                .find(|process| process.pid == listener.pid)
+            else {
+                continue;
+            };
+            let launch_managed = report.persistence.launch_items.iter().any(|item| {
+                crate::hygiene::process_matches_launch_item(
+                    item,
+                    &process.command,
+                    process.executable.as_deref(),
+                )
+            });
+            if process.ppid != 1
+                || process.elapsed_seconds < 24 * 60 * 60
+                || launch_managed
+                || crate::hygiene::stable_service_signature(process) != service_signature
+                || !seen.insert(process.pid)
+            {
+                continue;
+            }
+            let pid = process.pid;
+            action.controls.preconditions.extend([
+                ActionCheck {
+                    description: format!("PID {pid} still has the reviewed command"),
+                    kind: ActionCheckKind::ProcessMatches {
+                        pid,
+                        command_contains: process.command.clone(),
                     },
                 },
+                ActionCheck {
+                    description: format!("PID {pid} still listens on TCP port {port}"),
+                    kind: ActionCheckKind::ListenerPresent { pid, port },
+                },
+            ]);
+            let requires_root = process_requires_root(process);
+            action.controls.requires_root |= requires_root;
+            action.controls.recommended_steps.push(ActionStep {
+                description: format!("Request graceful termination of exact PID {pid}"),
+                command: Some(CommandSpec {
+                    program: "/bin/kill".into(),
+                    args: vec!["-TERM".into(), pid.to_string()],
+                    requires_root,
+                }),
             });
-            action.controls.undo.push(ActionStep {
+        }
+        action.controls.verification.push(ActionCheck {
+            description: format!("TCP port {port} is closed"),
+            kind: ActionCheckKind::PortClosed { port },
+        });
+    } else if finding.id == "detached-agent-browser-processes" {
+        let processes = report
+            .runtime
+            .processes
+            .iter()
+            .filter(|process| {
+                process.ppid == 1
+                    && process.elapsed_seconds >= 6 * 60 * 60
+                    && (process.command.contains("/.agent-browser/browsers/")
+                        || process.command.contains("agent-browser-darwin"))
+            })
+            .collect();
+        add_exact_process_steps(action, processes, "agent-browser/Chrome");
+    } else if finding.id == "zombie-processes" {
+        let parent_pids: BTreeSet<u32> = report
+            .runtime
+            .processes
+            .iter()
+            .filter(|process| process.state.contains('Z'))
+            .map(|process| process.ppid)
+            .collect();
+        for pid in parent_pids {
+            let Some(parent) = report
+                .runtime
+                .processes
+                .iter()
+                .find(|process| process.pid == pid)
+            else {
+                continue;
+            };
+            if protected_process_parent(parent) {
+                action.controls.recommended_steps.push(ActionStep {
+                    description: format!(
+                        "Do not signal protected/system zombie parent PID {pid}; inspect or reboot through normal macOS controls"
+                    ),
+                    command: None,
+                });
+                continue;
+            }
+            for zombie in report
+                .runtime
+                .processes
+                .iter()
+                .filter(|process| process.state.contains('Z') && process.ppid == pid)
+            {
+                action.controls.preconditions.push(ActionCheck {
+                    description: format!(
+                        "Zombie PID {} is still a zombie child of parent PID {pid}",
+                        zombie.pid
+                    ),
+                    kind: ActionCheckKind::ZombieParent {
+                        zombie_pid: zombie.pid,
+                        parent_pid: pid,
+                    },
+                });
+            }
+            action.controls.preconditions.push(ActionCheck {
+                description: format!("Zombie parent PID {pid} still has the reviewed command"),
+                kind: ActionCheckKind::ProcessMatches {
+                    pid,
+                    command_contains: parent.command.clone(),
+                },
+            });
+            let requires_root = process_requires_root(parent);
+            action.controls.requires_root |= requires_root;
+            action.controls.recommended_steps.push(ActionStep {
                 description: format!(
-                    "Restore the reviewed plist at `{}` and bootstrap it again",
-                    item.path.display()
+                    "After confirming it is not active work, request termination of zombie parent PID {pid}"
                 ),
-                command: None,
+                command: Some(CommandSpec {
+                    program: "/bin/kill".into(),
+                    args: vec!["-TERM".into(), pid.to_string()],
+                    requires_root,
+                }),
             });
         }
     }
+}
+
+fn protected_process_parent(process: &ProcessEntry) -> bool {
+    process.pid <= 1
+        || process_requires_root(process)
+        || process.command.starts_with("/System/")
+        || process.command.starts_with("/usr/libexec/")
+        || process.command.starts_with("/sbin/launchd")
+        || process.command.starts_with("/usr/sbin/")
+}
+
+fn add_exact_process_steps(action: &mut PlannedAction, processes: Vec<&ProcessEntry>, label: &str) {
+    let mut seen = BTreeSet::new();
+    for process in processes {
+        if !seen.insert(process.pid) {
+            continue;
+        }
+        let pid = process.pid;
+        action.controls.preconditions.push(ActionCheck {
+            description: format!("{label} PID {pid} still has the reviewed command"),
+            kind: ActionCheckKind::ProcessMatches {
+                pid,
+                command_contains: process.command.clone(),
+            },
+        });
+        let requires_root = process_requires_root(process);
+        action.controls.requires_root |= requires_root;
+        action.controls.recommended_steps.push(ActionStep {
+            description: format!("Request graceful termination of exact {label} PID {pid}"),
+            command: Some(CommandSpec {
+                program: "/bin/kill".into(),
+                args: vec!["-TERM".into(), pid.to_string()],
+                requires_root,
+            }),
+        });
+    }
+}
+
+fn process_requires_root(process: &ProcessEntry) -> bool {
+    current_uid()
+        .and_then(|uid| uid.parse::<u32>().ok())
+        .is_none_or(|uid| uid != process.uid)
+}
+
+fn evidence_value<'a>(finding: &'a Finding, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    finding
+        .evidence
+        .iter()
+        .find_map(|evidence| evidence.strip_prefix(&prefix))
+}
+
+fn evidence_number(finding: &Finding, key: &str) -> Option<u32> {
+    let prefix = format!("{key}=");
+    finding
+        .evidence
+        .iter()
+        .find_map(|evidence| evidence.strip_prefix(&prefix))?
+        .parse()
+        .ok()
 }
 
 fn file_identity(path: &Path) -> Option<FileIdentity> {
@@ -616,6 +893,21 @@ pub fn render_action_plan_markdown(plan: &ActionPlan) -> String {
             }
             out.push('\n');
         }
+        if !action.controls.recommended_steps.is_empty() {
+            out.push_str(
+                "Recommended reviewed steps (structured argv; do not paste as shell text):\n\n",
+            );
+            for step in &action.controls.recommended_steps {
+                out.push_str(&format!("- {}\n", step.description));
+                if let Some(command) = &step.command {
+                    out.push_str(&format!(
+                        "  - structured argv: `{}`\n",
+                        display_command(command)
+                    ));
+                }
+            }
+            out.push('\n');
+        }
         if !action.controls.undo.is_empty() {
             out.push_str("Undo:\n\n");
             for step in &action.controls.undo {
@@ -683,6 +975,12 @@ pub fn print_action_plan(plan: &ActionPlan) {
             "Requires root:".bold(),
             action.controls.requires_root
         );
+        for step in &action.controls.recommended_steps {
+            println!("  {} {}", "Reviewed step:".bold(), step.description);
+            if let Some(command) = &step.command {
+                println!("    argv={}", display_command(command));
+            }
+        }
         for check in &action.controls.verification {
             println!("  {} {}", "Verify:".bold(), check.description);
         }
@@ -702,6 +1000,15 @@ pub fn print_action_plan(plan: &ActionPlan) {
         "Tip: `macroscope plan --markdown cleanup-plan.md` writes this as a reviewable document."
             .dimmed()
     );
+}
+
+pub fn display_command(command: &CommandSpec) -> String {
+    let argv: Vec<&str> = std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect();
+    serde_json::to_string(&argv)
+        .unwrap_or_else(|_| "[\"<unserializable argv>\"]".into())
+        .replace('`', "\\u0060")
 }
 
 pub fn action_kind_label(kind: &ActionKind) -> &'static str {
@@ -857,6 +1164,12 @@ pub fn print_action_detail(action: &PlannedAction) {
     println!("      ID: {}", action.id.dimmed());
     println!("      {}", action.rationale.dimmed());
     println!("      {} {}", "Action:".bold(), action_instruction(action));
+    for step in &action.controls.recommended_steps {
+        println!("      {} {}", "Reviewed step:".bold(), step.description);
+        if let Some(command) = &step.command {
+            println!("        argv={}", display_command(command));
+        }
+    }
     if action.destructive {
         println!(
             "      {}",

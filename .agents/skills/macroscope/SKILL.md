@@ -28,7 +28,7 @@ MACROSCOPE="$(pwd)/.agents/skills/macroscope/scripts/macroscope-agent"
 ### 1. Capture evidence before changing anything
 
 ```bash
-"$MACROSCOPE" snapshot /tmp/macroscope-before.json
+"$MACROSCOPE" snapshot --name before-cleanup
 "$MACROSCOPE" graph --json > /tmp/macroscope-graph.json
 "$MACROSCOPE" brief --markdown /tmp/macroscope-brief.md --for-llm --full
 "$MACROSCOPE" plan --json > /tmp/macroscope-plan.json
@@ -47,7 +47,7 @@ Pay particular attention to:
 - detached agent-browser/Chrome groups
 - zombie processes and their parents
 
-Use `macroscope explain <finding-id>` for a focused rescan and explanation. When the user confirms intentional state, record it rather than repeatedly warning:
+Use `macroscope explain <finding-id>`, `macroscope explain --port <port>`, `macroscope explain --pid <pid>`, and `macroscope graph --finding <finding-id>` for focused investigation. When the user confirms intentional state, record it rather than repeatedly warning:
 
 ```bash
 "$MACROSCOPE" decide '<finding-id>' keep --reason 'user confirmed intentional'
@@ -85,8 +85,8 @@ For root-owned cleanup, present exact commands or a reviewable script and stop f
 After approved cleanup:
 
 ```bash
-"$MACROSCOPE" diff /tmp/macroscope-before.json
-"$MACROSCOPE" verify /tmp/macroscope-before.json --finding '<finding-id>' --strict
+"$MACROSCOPE" diff --since before-cleanup
+"$MACROSCOPE" verify ~/.local/state/macroscope/snapshots/before-cleanup.json --finding '<finding-id>' --strict
 "$MACROSCOPE" snapshot /tmp/macroscope-after.json
 ```
 
@@ -94,7 +94,7 @@ Verify all relevant invariants directly:
 
 - launchd label is absent or disabled
 - process is gone
-- listener port is closed
+- listener port is closed, with its loopback/LAN/Tailscale/wildcard/public exposure understood
 - plist/helper/package path is gone when removal was approved
 - unrelated active services remain running
 

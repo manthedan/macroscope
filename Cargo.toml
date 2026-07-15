@@ -1,6 +1,6 @@
 [package]
 name = "macroscope"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A local-first macOS evidence and remediation engine for humans and AI agents"
 license = "MIT"

@@ -1,10 +1,10 @@
 use macroscope::hygiene::{
     command_mentions_path, correlate_parent_apps, detect_hygiene_findings, parse_launch_item_bytes,
-    parse_lsof_output, parse_ps_executables, parse_ps_output, process_matches_launch_item,
-    redact_command,
+    parse_lsof_output, parse_lsof_output_with_tailscale_addresses, parse_ps_executables,
+    parse_ps_output, process_matches_launch_item, redact_command,
 };
 use macroscope::model::{AppsReport, LaunchItemScope, PersistenceReport, RuntimeReport};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 fn empty_apps() -> AppsReport {
@@ -549,7 +549,50 @@ fn detects_exposed_orphan_browser_group_and_zombie_from_runtime_fixtures() {
     assert_eq!(listeners.len(), 2);
     assert!(listeners[0].wildcard);
     assert!(!listeners[0].loopback);
+    assert_eq!(
+        listeners[0].exposure,
+        macroscope::model::ListenerExposure::Wildcard
+    );
     assert!(listeners[1].loopback);
+    assert_eq!(
+        listeners[1].exposure,
+        macroscope::model::ListenerExposure::Loopback
+    );
+    let tailscale_address = "100.100.20.30".parse().unwrap();
+    let classified = parse_lsof_output_with_tailscale_addresses(
+        "p1\ncserver\nn100.100.20.30:8765\np2\ncserver\nn192.168.1.20:9000\np3\ncserver\nn203.0.113.10:443\np4\ncserver\nn[::ffff:127.0.0.1]:8080\np5\ncserver\nn[::ffff:192.168.1.10]:8081\np6\ncserver\nn[::ffff:0.0.0.0]:8082\n",
+        &BTreeSet::from([tailscale_address]),
+    );
+    assert_eq!(
+        classified[0].exposure,
+        macroscope::model::ListenerExposure::Tailscale
+    );
+    assert_eq!(
+        parse_lsof_output("p1\ncserver\nn100.100.20.30:8765\n")[0].exposure,
+        macroscope::model::ListenerExposure::Unknown
+    );
+    assert_eq!(
+        classified[1].exposure,
+        macroscope::model::ListenerExposure::Lan
+    );
+    assert_eq!(
+        classified[2].exposure,
+        macroscope::model::ListenerExposure::Public
+    );
+    assert_eq!(
+        classified[3].exposure,
+        macroscope::model::ListenerExposure::Loopback
+    );
+    assert!(classified[3].loopback);
+    assert_eq!(
+        classified[4].exposure,
+        macroscope::model::ListenerExposure::Lan
+    );
+    assert_eq!(
+        classified[5].exposure,
+        macroscope::model::ListenerExposure::Wildcard
+    );
+    assert!(classified[5].wildcard);
 
     let findings = detect_hygiene_findings(
         &PersistenceReport::default(),
@@ -570,4 +613,11 @@ fn detects_exposed_orphan_browser_group_and_zombie_from_runtime_fixtures() {
     );
     assert!(ids.contains(&"detached-agent-browser-processes"));
     assert!(ids.contains(&"zombie-processes"));
+    let zombie = findings
+        .iter()
+        .find(|finding| finding.id == "zombie-processes")
+        .unwrap();
+    assert!(zombie.evidence[0].contains("pgid=6194"));
+    assert!(zombie.evidence[0].contains("parent_command=/Users/example/.local/bin/grok"));
+    assert!(zombie.evidence[0].contains("recommended_target_pid=6194"));
 }

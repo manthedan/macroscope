@@ -170,7 +170,7 @@ mod tests {
             Some("persistent-launch-item:user-agent:demo:abc".into());
         let summary = summarize_actions(std::slice::from_ref(&action));
         let plan = ActionPlan {
-            schema_version: 2,
+            schema_version: 3,
             summary,
             actions: vec![action],
         };
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(summary.high_risk, 1);
 
         let plan = ActionPlan {
-            schema_version: 2,
+            schema_version: 3,
             summary,
             actions,
         };

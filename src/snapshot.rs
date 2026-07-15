@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
 pub struct ReportDiff {
@@ -28,6 +28,17 @@ pub struct ReportDiff {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SnapshotHistoryEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub collected_at_unix: Option<u64>,
+    pub findings: Option<usize>,
+    pub risks: Option<usize>,
+    pub warnings: Option<usize>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct VerificationReport {
     pub passed: bool,
     pub baseline_collected_at_unix: u64,
@@ -41,6 +52,110 @@ pub struct VerificationReport {
     pub inconclusive_errors: Vec<String>,
 }
 
+pub fn managed_snapshot_dir() -> Result<PathBuf> {
+    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+        let root = PathBuf::from(root);
+        if root.is_absolute() {
+            return Ok(root.join("macroscope/snapshots"));
+        }
+    }
+    let home = dirs::home_dir().context("cannot locate home directory for snapshot storage")?;
+    Ok(home.join(".local/state/macroscope/snapshots"))
+}
+
+pub fn managed_snapshot_path(name: &str) -> Result<PathBuf> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        anyhow::bail!("snapshot name must use only letters, numbers, '.', '_', or '-'");
+    }
+    Ok(managed_snapshot_dir()?.join(format!("{name}.json")))
+}
+
+pub fn save_managed_snapshot(name: Option<&str>, report: &Report) -> Result<PathBuf> {
+    let generated;
+    let name = if let Some(name) = name {
+        name
+    } else {
+        generated = format!("snapshot-{}", report.collected_at_unix);
+        &generated
+    };
+    let path = managed_snapshot_path(name)?;
+    if path
+        .try_exists()
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+    {
+        anyhow::bail!("managed snapshot `{name}` already exists; choose another name");
+    }
+    crate::util::atomic_write_private_new(&path, &serde_json::to_vec_pretty(report)?)
+        .with_context(|| format!("failed to create immutable managed snapshot `{name}`"))?;
+    Ok(path)
+}
+
+pub fn list_managed_snapshots() -> Result<Vec<SnapshotHistoryEntry>> {
+    let root = managed_snapshot_dir()?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", root.display()));
+        }
+    };
+    let mut history = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", root.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".into());
+        match load_snapshot(&path) {
+            Ok(report) => history.push(SnapshotHistoryEntry {
+                name,
+                path,
+                collected_at_unix: Some(report.collected_at_unix),
+                findings: Some(report.findings.len()),
+                risks: Some(
+                    report
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.severity == Severity::Risk)
+                        .count(),
+                ),
+                warnings: Some(
+                    report
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.severity == Severity::Warn)
+                        .count(),
+                ),
+                error: None,
+            }),
+            Err(error) => history.push(SnapshotHistoryEntry {
+                name,
+                path,
+                collected_at_unix: None,
+                findings: None,
+                risks: None,
+                warnings: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    history.sort_by(|a, b| {
+        b.collected_at_unix
+            .cmp(&a.collected_at_unix)
+            .then(a.name.cmp(&b.name))
+    });
+    Ok(history)
+}
+
 pub fn save_snapshot(path: &Path, report: &Report) -> Result<()> {
     crate::util::atomic_write_private(path, &serde_json::to_vec_pretty(report)?)
         .with_context(|| format!("failed to save snapshot {}", path.display()))
@@ -51,7 +166,7 @@ pub fn load_snapshot(path: &Path) -> Result<Report> {
         .with_context(|| format!("failed to read snapshot {}", path.display()))?;
     let report: Report = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse snapshot {}", path.display()))?;
-    if report.schema_version > 3 {
+    if report.schema_version > 4 {
         anyhow::bail!(
             "snapshot schema {} is newer than this binary supports",
             report.schema_version
@@ -391,7 +506,7 @@ fn collector_failed_for(finding: &crate::model::Finding, report: &Report) -> boo
                         })
                     }) || !report.apps.root_errors.is_empty()))
         }
-        FindingCategory::Runtime => !report.runtime.errors.is_empty(),
+        FindingCategory::Runtime => runtime_collector_failed_for(finding, report),
         FindingCategory::PackageManager => {
             if finding.id.contains("homebrew") {
                 report.homebrew.error.is_some()
@@ -424,6 +539,22 @@ fn collector_failed_for(finding: &crate::model::Finding, report: &Report) -> boo
     }
 }
 
+fn runtime_collector_failed_for(finding: &crate::model::Finding, report: &Report) -> bool {
+    report.runtime.errors.iter().any(|error| {
+        let lower = error.to_ascii_lowercase();
+        if finding.id.starts_with("old-detached-listener:") {
+            lower.starts_with("lsof failed") || lower.starts_with("failed to run lsof")
+        } else if matches!(
+            finding.id.as_str(),
+            "detached-agent-browser-processes" | "zombie-processes"
+        ) {
+            lower.starts_with("ps failed") || lower.starts_with("failed to run ps")
+        } else {
+            true
+        }
+    })
+}
+
 fn path_errors_affect(path: &str, errors: &[String]) -> bool {
     errors.iter().any(|error| {
         let source = error.split(": ").next().unwrap_or(error);
@@ -438,8 +569,10 @@ fn path_errors_affect(path: &str, errors: &[String]) -> bool {
 fn runtime_evidence_still_present(finding: &crate::model::Finding, after: &Report) -> bool {
     if finding.id == "detached-agent-browser-processes" {
         return after.runtime.processes.iter().any(|process| {
-            process.command.contains("/.agent-browser/browsers/")
-                || process.command.contains("agent-browser-darwin")
+            process.ppid == 1
+                && process.elapsed_seconds >= 6 * 60 * 60
+                && (process.command.contains("/.agent-browser/browsers/")
+                    || process.command.contains("agent-browser-darwin"))
         });
     }
     if !finding.id.starts_with("old-detached-listener:") {

@@ -43,7 +43,7 @@ pub fn build_findings(
                 findings.push(finding(
                     format!("intel-app:{}", app.path.display()),
                     FindingCategory::Architecture,
-                    Severity::Warn,
+                    Severity::Info,
                     Confidence::High,
                     "Intel-only app executable",
                     format!(

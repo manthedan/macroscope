@@ -71,7 +71,7 @@ where
     };
 
     Report {
-        schema_version: 3,
+        schema_version: 4,
         collected_at_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

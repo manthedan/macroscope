@@ -10,6 +10,14 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    atomic_write_private_impl(path, contents, false)
+}
+
+pub fn atomic_write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
+    atomic_write_private_impl(path, contents, true)
+}
+
+fn atomic_write_private_impl(path: &Path, contents: &[u8], no_replace: bool) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -48,9 +56,18 @@ pub fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
             return Err(error).with_context(|| format!("failed to write {}", temporary.display()));
         }
         drop(file);
-        if let Err(error) = fs::rename(&temporary, path) {
+        let install_result = if no_replace {
+            fs::hard_link(&temporary, path)
+        } else {
+            fs::rename(&temporary, path)
+        };
+        if let Err(error) = install_result {
             let _ = fs::remove_file(&temporary);
-            return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+            let operation = if no_replace { "create" } else { "replace" };
+            return Err(error).with_context(|| format!("failed to {operation} {}", path.display()));
+        }
+        if no_replace {
+            let _ = fs::remove_file(&temporary);
         }
         return Ok(());
     }
