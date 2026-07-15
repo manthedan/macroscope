@@ -1,19 +1,23 @@
 pub mod apply;
 pub mod brief;
+pub mod correlation;
+pub mod decisions;
 pub mod findings;
 pub mod guide;
+pub mod hygiene;
 pub mod markdown;
 pub mod model;
 pub mod output;
 pub mod plan;
 pub mod scan;
+pub mod snapshot;
 pub mod util;
 
 #[cfg(test)]
 mod tests {
     use super::brief::executable_action_count;
     use super::model::*;
-    use super::plan::{action_disposition, slugify, summarize_actions};
+    use super::plan::{action_disposition, related_actions, slugify, summarize_actions};
     use super::scan::{parse_conda_info, parse_npm_packages};
     use super::util::simplify_file_arch;
     use std::path::PathBuf;
@@ -32,6 +36,7 @@ mod tests {
             risk,
             destructive,
             kind,
+            controls: ActionControls::default(),
         }
     }
 
@@ -152,6 +157,30 @@ mod tests {
     }
 
     #[test]
+    fn finding_ids_resolve_related_actions_directly() {
+        let mut action = planned_action(
+            "review-persistent-launch-item-user-agent-demo",
+            false,
+            ActionRisk::Medium,
+            ActionKind::Manual {
+                instructions: "review".into(),
+            },
+        );
+        action.controls.source_finding_id =
+            Some("persistent-launch-item:user-agent:demo:abc".into());
+        let summary = summarize_actions(std::slice::from_ref(&action));
+        let plan = ActionPlan {
+            schema_version: 2,
+            summary,
+            actions: vec![action],
+        };
+        assert_eq!(
+            related_actions("persistent-launch-item:user-agent:demo:abc", &plan).len(),
+            1
+        );
+    }
+
+    #[test]
     fn summarizes_actions_and_counts_executable_trash_actions() {
         let actions = vec![
             planned_action(
@@ -187,7 +216,11 @@ mod tests {
         assert_eq!(summary.medium_risk, 1);
         assert_eq!(summary.high_risk, 1);
 
-        let plan = ActionPlan { summary, actions };
+        let plan = ActionPlan {
+            schema_version: 2,
+            summary,
+            actions,
+        };
         assert_eq!(executable_action_count(&plan), 1);
     }
 }

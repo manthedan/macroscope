@@ -1,6 +1,43 @@
 # Macroscope Roadmap
 
-Macroscope should become a trustworthy developer-environment archaeologist: it audits a Mac, explains what it found, produces safe, reversible cleanup or migration plans, and exports high-quality briefs for humans or AI coding agents.
+Macroscope should become a trustworthy macOS evidence and remediation engine: it audits persistence, runtime state, listeners, ownership, and developer-environment leftovers; explains correlated findings; produces safe plans; and gives humans or AI agents reliable before/after verification.
+
+## v0.2 agent-first pivot
+
+The binary is the deterministic sensor and guarded executor. The Agent Skill supplies the workflow and safety contract. The agent supplies contextual judgment and asks the user about current use.
+
+### Phase 1 — persistence/runtime evidence
+
+- [x] Scan third-party LaunchAgents and LaunchDaemons
+- [x] Parse KeepAlive, RunAtLoad, programs, and associated bundle IDs
+- [x] Scan processes and TCP listeners
+- [x] Detect AppTranslocation persistence and orphaned privileged helpers
+- [x] Detect old detached wildcard listeners, detached agent browsers, and zombies
+- [x] Add fixture-backed detection tests
+- [x] Add stable finding IDs, categories, confidence, and evidence
+
+### Phase 2 — correlation and snapshots
+
+- [x] Correlate launchd labels → processes → listeners → executables → apps/packages
+- [x] Add `snapshot`, `diff`, and explicit before/after verification commands
+- [x] Record collection timestamp, host-independent schema version, collector errors, and evidence provenance
+- Add last-opened/modified time, size, code signing, quarantine, and package receipts
+- Group repeated architecture findings into actionable families
+
+### Phase 3 — guarded remediation contracts
+
+- [x] Add action preconditions, exact argv, root requirement, undo guidance, and verification checks
+- [x] Reject protected/arbitrary paths in externally supplied plans
+- Generate reviewable administrator scripts without handling passwords
+- [x] Add keep/ignore/snooze decisions so known-good services stop resurfacing
+- Keep vendor uninstallers and package-manager operations ahead of direct deletion
+
+### Phase 4 — distribution
+
+- [x] Ship a project-level `.agents/skills/macroscope/SKILL.md`
+- [x] Package and publish the binary and Agent Skill together from tagged releases
+- [x] Validate the skill against the Agent Skills standard in CI
+- [x] Add synthetic fixture reports; never commit real machine inventories
 
 ## Scope
 
@@ -108,7 +145,7 @@ macroscope guide --apply
 macroscope guide --no-prompt
 ```
 
-The guide should be the primary interactive experience:
+The guide remains a useful human fallback, but the Agent Skill plus structured CLI output is the primary experience. For the legacy guided flow:
 
 1. Scan the Mac with progress.
 2. Summarize risk/warn/info findings and proposed actions.

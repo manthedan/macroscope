@@ -1,13 +1,19 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use macroscope::{
     apply::{apply_action_plan, dry_run_action_plan, load_or_generate_plan},
     brief::render_brief,
+    correlation::print_correlation_graph,
+    decisions::{clear_decision, load_decisions, record_decision},
     guide::{GuideOptions, run_guide},
     markdown::render_markdown,
+    model::DecisionKind,
     output::{print_explanation, print_summary},
     plan::{generate_action_plan, print_action_plan, render_action_plan_markdown},
     scan::{scan, scan_with_cli_progress},
+    snapshot::{
+        diff_reports, load_snapshot, print_diff, print_verification, save_snapshot, verify_reports,
+    },
 };
 use std::fs;
 use std::path::PathBuf;
@@ -15,7 +21,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "macroscope")]
 #[command(version)]
-#[command(about = "Audit your macOS developer environment", long_about = None)]
+#[command(about = "Collect macOS cleanup evidence for humans and AI agents", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -23,13 +29,81 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Scan this Mac and print a pretty developer-environment audit.
+    /// Scan macOS persistence, runtime state, and developer-environment evidence.
     Scan {
         /// Write a Markdown report to this path.
         #[arg(long)]
         markdown: Option<PathBuf>,
 
         /// Emit JSON instead of the pretty text summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Save a versioned evidence snapshot for later diff or verification.
+    Snapshot {
+        /// Snapshot JSON output path.
+        output: PathBuf,
+    },
+
+    /// Compare two snapshots, or a snapshot with a fresh live scan.
+    Diff {
+        /// Baseline snapshot.
+        before: PathBuf,
+
+        /// Optional second snapshot; omit to scan the current Mac.
+        after: Option<PathBuf>,
+
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Verify baseline persistence/runtime findings against a fresh scan.
+    Verify {
+        /// Baseline snapshot.
+        baseline: PathBuf,
+
+        /// Verify only these finding IDs; repeat for multiple targets.
+        #[arg(long = "finding")]
+        findings: Vec<String>,
+
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+
+        /// Return a non-zero status when any target remains.
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Print the launch → process → listener → executable → owner graph.
+    Graph {
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Record a keep, ignore, or snooze decision for a stable finding ID.
+    Decide {
+        finding_id: String,
+        decision: DecisionArg,
+
+        /// Reason recorded with the decision.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Snooze duration; ignored for keep/ignore.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+
+    /// Remove a recorded decision so the finding becomes active again.
+    Undecide { finding_id: String },
+
+    /// List recorded finding decisions.
+    Decisions {
+        /// Emit JSON instead of text.
         #[arg(long)]
         json: bool,
     },
@@ -96,6 +170,23 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DecisionArg {
+    Keep,
+    Ignore,
+    Snooze,
+}
+
+impl From<DecisionArg> for DecisionKind {
+    fn from(value: DecisionArg) -> Self {
+        match value {
+            DecisionArg::Keep => DecisionKind::Keep,
+            DecisionArg::Ignore => DecisionKind::Ignore,
+            DecisionArg::Snooze => DecisionKind::Snooze,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -119,6 +210,104 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print_summary(&report);
+            }
+        }
+        Commands::Snapshot { output } => {
+            let report = scan_with_cli_progress("Capturing evidence snapshot");
+            save_snapshot(&output, &report)?;
+            println!("Wrote {}", output.display());
+        }
+        Commands::Diff {
+            before,
+            after,
+            json,
+        } => {
+            let before = load_snapshot(&before)?;
+            let after = if let Some(path) = after {
+                load_snapshot(&path)?
+            } else if json {
+                scan()
+            } else {
+                scan_with_cli_progress("Scanning for snapshot diff")
+            };
+            let diff = diff_reports(&before, &after);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diff)?);
+            } else {
+                print_diff(&diff);
+            }
+        }
+        Commands::Verify {
+            baseline,
+            findings,
+            json,
+            strict,
+        } => {
+            let before = load_snapshot(&baseline)?;
+            let after = if json {
+                scan()
+            } else {
+                scan_with_cli_progress("Verifying current state")
+            };
+            let verification = verify_reports(&before, &after, &findings);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&verification)?);
+            } else {
+                print_verification(&verification);
+            }
+            if strict && !verification.passed {
+                anyhow::bail!(
+                    "verification incomplete: {} remaining, {} unknown, {} inconclusive, {} collector error(s)",
+                    verification.remaining.len(),
+                    verification.unknown_targets.len(),
+                    verification.inconclusive_targets.len(),
+                    verification.inconclusive_errors.len()
+                );
+            }
+        }
+        Commands::Graph { json } => {
+            let report = if json {
+                scan()
+            } else {
+                scan_with_cli_progress("Building correlation graph")
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report.correlations)?);
+            } else {
+                print_correlation_graph(&report.correlations);
+            }
+        }
+        Commands::Decide {
+            finding_id,
+            decision,
+            reason,
+            days,
+        } => {
+            let record = record_decision(finding_id, decision.into(), reason, Some(days))?;
+            println!("Recorded {:?} for {}", record.decision, record.finding_id);
+        }
+        Commands::Undecide { finding_id } => {
+            if clear_decision(&finding_id)? {
+                println!("Removed decision for {finding_id}");
+            } else {
+                println!("No decision recorded for {finding_id}");
+            }
+        }
+        Commands::Decisions { json } => {
+            let decisions = load_decisions()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&decisions)?);
+            } else if decisions.is_empty() {
+                println!("No recorded decisions.");
+            } else {
+                for decision in decisions {
+                    println!(
+                        "{:?}\t{}\t{}",
+                        decision.decision,
+                        decision.finding_id,
+                        decision.reason.as_deref().unwrap_or("")
+                    );
+                }
             }
         }
         Commands::Plan { markdown, json } => {
@@ -180,7 +369,7 @@ fn main() -> Result<()> {
         Commands::Apply { plan, dry_run, yes } => {
             let plan = load_or_generate_plan(plan.as_deref())?;
             if dry_run {
-                dry_run_action_plan(&plan);
+                dry_run_action_plan(&plan)?;
             } else {
                 apply_action_plan(&plan, yes)?;
             }

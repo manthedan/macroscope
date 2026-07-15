@@ -2,6 +2,29 @@
 
 All notable changes to Macroscope will be documented in this file.
 
+## [0.2.0] - 2026-07-14
+
+### Added
+
+- Agent Skills-compatible workflow at `.agents/skills/macroscope/SKILL.md` with a source-aware CLI wrapper.
+- Third-party LaunchAgent and LaunchDaemon inventory with KeepAlive, RunAtLoad, program, scope, associated bundle IDs, and parent-app correlation.
+- Runtime process and TCP-listener inventory.
+- Versioned/timestamped evidence reports with stable finding IDs, categories, confidence, and structured evidence.
+- Runtime command-line redaction for common token, password, secret, credential, and API-key arguments.
+- Fixture-backed detections for suspicious KeepAlive jobs, AppTranslocation persistence, orphaned privileged helpers, old detached wildcard listeners, detached agent-browser groups, and zombie processes.
+- Persistence/runtime findings now produce cautious manual remediation plans.
+- Versioned `snapshot`, stable-ID `diff`, and targeted `verify` workflows.
+- Correlation graph linking launch items, processes, listeners, executables, applications, and inferred packages.
+- Persistent keep/ignore/snooze decisions keyed by stable finding ID.
+- Versioned action controls for provenance, preconditions, administrator requirements, undo, and verification.
+- Release packaging that ships the native binary and matching Agent Skill in one checksummed archive.
+
+### Changed
+
+- Repositioned Macroscope as an agent-first macOS evidence and remediation engine while retaining the human guide as a fallback.
+- JSON, Markdown, terminal, and handoff output now include persistence/runtime evidence.
+- Automatic cleanup now rejects protected/arbitrary paths, stale externally supplied actions, duplicate IDs, and plans without matching safeguards.
+
 ## [0.1.0] - 2026-04-24
 
 Initial public release.

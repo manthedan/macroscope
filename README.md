@@ -4,13 +4,13 @@
 
 # Macroscope
 
-Macroscope is a local-first macOS developer-environment auditor written in Rust.
+Macroscope is a local-first macOS evidence and remediation engine written in Rust. It is designed to be run by an AI agent or a human who wants deterministic evidence before cleanup.
 
 It answers:
 
-> What is installed on this Mac, where did it come from, is it native, and what is probably stale?
+> What persists, what is running or listening, where did it come from, and what is probably stale or broken?
 
-Macroscope deeply understands the Mac layer — Apple Silicon vs Intel leftovers, Homebrew prefixes, app bundles, `/usr/local/bin`, PATH, and ownership hints — while shallowly inventorying common developer ecosystems so ambiguous cleanup can be handed to a human or AI coding agent.
+Macroscope correlates third-party launch items, processes, TCP listeners, privileged helpers, applications, package-manager ownership, Apple Silicon leftovers, `/usr/local/bin`, PATH, and developer ecosystems. It emits structured JSON and cautious plans so an agent can apply contextual judgment without rediscovering the machine from scratch.
 
 ## Status
 
@@ -20,6 +20,7 @@ Macroscope is pre-1.0 software. It is intentionally conservative:
 - explain before action
 - migration/reinstall guidance before deletion
 - package-manager-owned files are review-only
+- common command-line secret arguments are redacted from runtime evidence
 - only Move-to-Trash actions execute automatically
 
 ## Installation
@@ -30,6 +31,16 @@ Macroscope is pre-1.0 software. It is intentionally conservative:
 git clone https://github.com/manthedan/macroscope.git
 cd macroscope
 cargo install --path .
+```
+
+### Binary + Agent Skill release archive
+
+Each GitHub release publishes checksummed Apple Silicon and Intel archives containing both `bin/macroscope` and the matching `.agents/skills/macroscope` package. Put the binary on `PATH` and copy or symlink the skill into `~/.agents/skills/macroscope`.
+
+Maintainers produce the same archive locally with:
+
+```bash
+scripts/package-release.sh aarch64-apple-darwin
 ```
 
 ### Homebrew tap
@@ -43,19 +54,39 @@ brew install macroscope
 
 ## Quickstart
 
+For an agent-oriented evidence pass:
+
 ```bash
-macroscope guide
-macroscope brief --markdown macroscope-brief.md --for-llm
+macroscope snapshot /tmp/macroscope-before.json
+macroscope graph --json > /tmp/macroscope-graph.json
+macroscope brief --markdown /tmp/macroscope-brief.md --for-llm --full
+macroscope plan --json > /tmp/macroscope-plan.json
+```
+
+After approved cleanup, compare and verify stable findings:
+
+```bash
+macroscope diff /tmp/macroscope-before.json
+macroscope verify /tmp/macroscope-before.json --finding '<finding-id>' --strict
+```
+
+For a human-readable workflow:
+
+```bash
 macroscope scan --markdown macroscope-report.md
 macroscope plan --markdown macroscope-plan.md
+macroscope guide
 ```
 
-For JSON output:
+### Agent Skill
 
-```bash
-macroscope scan --json
-macroscope plan --json
+The repository includes an Agent Skills-compatible package at:
+
+```text
+.agents/skills/macroscope/SKILL.md
 ```
+
+Pi and other compatible harnesses discover it when the repository is trusted and in scope. To install it globally, copy or symlink `.agents/skills/macroscope` into `~/.agents/skills/macroscope`. In a source checkout, the skill wrapper runs the matching Cargo project; release archives bundle a native binary and the matching skill together.
 
 For a safe cleanup preview:
 
@@ -77,6 +108,15 @@ macroscope apply --yes plan.json
 macroscope scan
 macroscope scan --json
 macroscope scan --markdown macroscope-report.md
+macroscope snapshot before.json
+macroscope diff before.json [after.json]
+macroscope verify before.json --finding '<finding-id>' --strict
+macroscope graph --json
+
+macroscope decide '<finding-id>' keep --reason 'intentional service'
+macroscope decide '<finding-id>' snooze --days 14
+macroscope decisions --json
+macroscope undecide '<finding-id>'
 
 macroscope plan
 macroscope plan --json
@@ -99,9 +139,21 @@ macroscope apply --yes plan.json
 
 Collects local evidence and prints a pretty summary by default. JSON and Markdown output are available for automation or review.
 
+### `snapshot`, `diff`, and `verify`
+
+`snapshot` stores a versioned evidence report. `diff` compares stable finding IDs, launch-item definitions, listeners, and graph size against another snapshot or a fresh scan. `verify` checks selected findings—or all baseline persistence/runtime warnings by default—against current state. Use `--strict` when an agent or CI workflow needs a failing exit status for unresolved targets.
+
+### `graph`
+
+Emits the correlation graph connecting launch labels, processes, listeners, executable paths, applications, and inferred package ownership.
+
+### `decide`, `decisions`, and `undecide`
+
+Records durable `keep`, `ignore`, or time-limited `snooze` decisions in `~/.config/macroscope/decisions.json`. Decisions suppress matching stable finding IDs without deleting the underlying evidence from snapshots.
+
 ### `plan`
 
-Generates a read-only cleanup/migration action plan. Actions include risk, confidence, whether they are destructive, and a structured kind such as `MoveToTrash`, `BrewInstall`, or `Manual`.
+Generates a read-only cleanup/migration action plan. Actions include risk, confidence, provenance, preconditions, root requirements, undo steps, verification checks, and a structured kind such as `MoveToTrash`, `BrewInstall`, or `Manual`.
 
 ### `brief`
 
@@ -136,10 +188,15 @@ Explains a path, action ID, bundle ID, or finding text and shows related planned
 
 ### `apply`
 
-Executes only supported action kinds. In v0.1.0 that means only `MoveToTrash` actions. Package-manager and manual actions are printed for review and are not executed automatically.
+Executes only supported action kinds. In v0.2.0 that means only guarded `MoveToTrash` actions under `/usr/local/bin`. Package-manager and manual actions are printed for review and are not executed automatically. Real apply rejects stale externally supplied actions, duplicate IDs, protected/arbitrary paths, and missing safeguards.
 
 ## What Macroscope scans
 
+- Third-party LaunchAgents and LaunchDaemons, including KeepAlive, RunAtLoad, executable paths, and associated apps
+- Correlation chains from launch labels through processes/listeners to executables and app/package provenance
+- Processes, PPIDs, age, state, CPU/memory, and commands
+- TCP listeners, wildcard exposure, loopback binding, and process ownership
+- Broken AppTranslocation persistence, orphaned privileged helpers, old detached listeners, detached agent browsers, and zombies
 - System architecture and macOS version
 - Homebrew prefix, formulae, casks, leaves, outdated packages, services, autoremove preview, and cleanup dry-run output
 - `/Applications` and `~/Applications`
@@ -160,14 +217,14 @@ Executes only supported action kinds. In v0.1.0 that means only `MoveToTrash` ac
 - `guide --no-prompt` never mutates.
 - Real CLI mutation requires `apply --yes`.
 - Real guided mutation requires `guide --apply`, a dry-run, and typed confirmation.
-- Only `MoveToTrash` actions execute automatically.
+- Only freshly revalidated `MoveToTrash` actions for direct `/usr/local/bin` children execute automatically.
 - File/symlink cleanup uses direct `~/.Trash` moves first, with Finder as fallback where appropriate.
 - Package-manager actions are review-only for now.
 - High-risk actions such as app support deletion, shell init edits, Conda root removal, LaunchAgent removal, and broad package-manager cleanup are manual/handoff items.
 
 ## Scope
 
-Macroscope should deeply understand the Mac developer-environment layer and shallowly inventory language/tool ecosystems.
+Macroscope should deeply understand macOS persistence/runtime hygiene and the Mac developer-environment layer, while shallowly inventorying language/tool ecosystems. The CLI is the deterministic evidence and guarded-execution layer; human or AI agents own contextual judgment.
 
 In scope:
 
@@ -192,6 +249,9 @@ Out of scope by default:
 
 ```text
 src/main.rs      CLI argument parsing and command dispatch
+src/snapshot.rs  versioned snapshot, stable diff, and verification workflows
+src/correlation.rs evidence graph construction and rendering
+src/decisions.rs persistent keep/ignore/snooze decisions
 src/lib.rs       library module wiring and focused unit tests
 src/model.rs     shared report/action data structures
 src/scan.rs      scan orchestration and source-specific scanners
@@ -199,6 +259,7 @@ src/findings.rs  finding generation and reusable finding helpers
 src/plan.rs      ActionPlan generation, rendering, and relation matching
 src/brief.rs     human/AI handoff brief rendering
 src/guide.rs     guided scan/plan/handoff/apply workflow
+src/hygiene.rs   persistence/runtime collectors, parsers, correlation, and anomaly detection
 src/apply.rs     dry-run/apply execution and Trash-backed moves
 src/markdown.rs  Markdown report rendering
 src/output.rs    pretty terminal output and explanations

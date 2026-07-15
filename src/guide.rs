@@ -36,7 +36,7 @@ pub fn run_guide(options: GuideOptions) -> Result<()> {
     if !plan.actions.is_empty()
         && (options.no_prompt || prompt_yes("Show a dry-run of the current action plan?", true)?)
     {
-        dry_run_action_plan(&plan);
+        dry_run_action_plan(&plan)?;
     }
 
     if options.apply {
@@ -200,11 +200,11 @@ fn maybe_apply(plan: &ActionPlan, no_prompt: bool) -> Result<()> {
             "{}",
             "--no-prompt never performs real mutations; dry-run only.".dimmed()
         );
-        dry_run_action_plan(plan);
+        dry_run_action_plan(plan)?;
         return Ok(());
     }
 
-    dry_run_action_plan(plan);
+    dry_run_action_plan(plan)?;
     let expected = format!("APPLY {executable}");
     println!(
         "{}",

@@ -68,6 +68,35 @@ pub fn print_summary(report: &Report) {
         )),
     ]);
     overview.add_row(vec![
+        Cell::new("Persistence"),
+        Cell::new("launch items / scan errors"),
+        Cell::new(format!(
+            "{} / {}",
+            report.persistence.launch_items.len(),
+            report.persistence.errors.len()
+        )),
+    ]);
+    overview.add_row(vec![
+        Cell::new("Runtime"),
+        Cell::new("processes / listeners / scan errors"),
+        Cell::new(format!(
+            "{} / {} / {}",
+            report.runtime.processes.len(),
+            report.runtime.listeners.len(),
+            report.runtime.errors.len()
+        )),
+    ]);
+    overview.add_row(vec![
+        Cell::new("Correlations"),
+        Cell::new("nodes / edges / suppressed findings"),
+        Cell::new(format!(
+            "{} / {} / {}",
+            report.correlations.nodes.len(),
+            report.correlations.edges.len(),
+            report.suppressed_findings.len()
+        )),
+    ]);
+    overview.add_row(vec![
         Cell::new("/usr/local/bin"),
         Cell::new("entries / Intel-only"),
         Cell::new(format!("{} / {}", report.local_bins.len(), intel_bins)),
@@ -143,16 +172,25 @@ pub fn print_summary(report: &Report) {
         format!("{infos} info").blue().bold()
     );
 
+    if !report.suppressed_findings.is_empty() {
+        println!(
+            "  {} finding(s) suppressed by keep/ignore/snooze decisions",
+            report.suppressed_findings.len()
+        );
+    }
+
     if report.findings.is_empty() {
         println!("  {}", "No notable findings. Nice.".green());
     } else {
         for finding in &report.findings {
             println!(
-                "  {} {}",
+                "  {} {} {}",
                 severity_badge(&finding.severity),
+                format!("{:?}", finding.category).dimmed(),
                 finding.title.bold()
             );
             println!("      {}", finding.detail.dimmed());
+            println!("      ID: {}", finding.id.dimmed());
         }
     }
 
@@ -322,11 +360,13 @@ pub fn print_explanation(target: &str, report: &Report, plan: &ActionPlan) {
     let matched_findings: Vec<&Finding> = report
         .findings
         .iter()
+        .chain(report.suppressed_findings.iter().map(|item| &item.finding))
         .filter(|finding| {
-            finding
-                .title
-                .to_lowercase()
-                .contains(&target.to_lowercase())
+            finding.id.eq_ignore_ascii_case(target)
+                || finding
+                    .title
+                    .to_lowercase()
+                    .contains(&target.to_lowercase())
                 || finding
                     .detail
                     .to_lowercase()
@@ -338,11 +378,29 @@ pub fn print_explanation(target: &str, report: &Report, plan: &ActionPlan) {
         println!("{}", "Matched findings".bold());
         for finding in matched_findings {
             println!(
-                "  {} {}",
+                "  {} {} {}",
                 severity_badge(&finding.severity),
+                format!("{:?}", finding.category).dimmed(),
                 finding.title.bold()
             );
             println!("      {}", finding.detail.dimmed());
+            println!("      ID: {}", finding.id.dimmed());
+            if let Some(suppressed) = report
+                .suppressed_findings
+                .iter()
+                .find(|item| item.finding.id == finding.id)
+            {
+                println!(
+                    "      Decision: {:?}{}",
+                    suppressed.decision.decision,
+                    suppressed
+                        .decision
+                        .reason
+                        .as_deref()
+                        .map(|reason| format!(" — {reason}"))
+                        .unwrap_or_default()
+                );
+            }
         }
         println!();
         print_related_actions(target, plan);

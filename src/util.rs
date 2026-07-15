@@ -1,9 +1,64 @@
 use crate::model::{AppEntry, CondaReport, GoReport, HomebrewService, ToolVersion};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use plist::Value;
 use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .context("cannot atomically write a path without a file name")?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for attempt in 0..100_u32 {
+        let temporary = parent.join(format!(
+            ".{file_name}.tmp-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create temporary file {}", temporary.display())
+                });
+            }
+        };
+        if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error).with_context(|| format!("failed to write {}", temporary.display()));
+        }
+        drop(file);
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+        }
+        return Ok(());
+    }
+    anyhow::bail!(
+        "failed to allocate a unique temporary file for {}",
+        path.display()
+    )
+}
 
 pub fn plist_string(plist: &Option<Value>, key: &str) -> Option<String> {
     plist
@@ -233,7 +288,10 @@ pub fn push_app_table_md(out: &mut String, apps: &[AppEntry]) {
 }
 
 pub fn md_escape(value: &str) -> String {
-    value.replace('|', "\\|").replace('\n', " ")
+    value
+        .replace('`', "ʼ")
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ")
 }
 
 pub fn push_bullets(out: &mut String, values: &[String]) {
@@ -241,7 +299,7 @@ pub fn push_bullets(out: &mut String, values: &[String]) {
         out.push_str("None.\n\n");
     } else {
         for value in values {
-            out.push_str(&format!("- `{value}`\n"));
+            out.push_str(&format!("- `{}`\n", md_escape(value)));
         }
         out.push('\n');
     }

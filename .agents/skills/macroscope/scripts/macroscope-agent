@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${MACROSCOPE_BIN:-}" ]]; then
+  exec "$MACROSCOPE_BIN" "$@"
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/../../../.." && pwd -P)"
+manifest="$repo_root/Cargo.toml"
+packaged_bin="$repo_root/bin/macroscope"
+
+# A project skill must use matching Macroscope source, never an unrelated
+# Cargo project that happens to contain a copied skill directory.
+package_name=""
+if [[ -f "$manifest" ]]; then
+  package_name="$(awk '
+    /^\[package\][[:space:]]*$/ { in_package=1; next }
+    /^\[/ { in_package=0 }
+    in_package && /^[[:space:]]*name[[:space:]]*=/ {
+      value=$0; sub(/^[^=]*=[[:space:]]*/, "", value); gsub(/["[:space:]]/, "", value); print value; exit
+    }
+  ' "$manifest")"
+fi
+if [[ "$package_name" == "macroscope" ]]; then
+  exec cargo run --quiet --manifest-path "$manifest" -- "$@"
+fi
+
+if [[ -x "$packaged_bin" ]]; then
+  exec "$packaged_bin" "$@"
+fi
+
+if command -v macroscope >/dev/null 2>&1; then
+  exec macroscope "$@"
+fi
+
+echo "macroscope is not installed and the source checkout could not be found." >&2
+echo "Install it with: cargo install --path /path/to/macroscope" >&2
+exit 127

@@ -14,7 +14,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 pub fn scan() -> Report {
@@ -34,7 +34,7 @@ pub fn scan_with_observer<F>(mut progress: F) -> Report
 where
     F: FnMut(&'static str, usize, usize),
 {
-    const TOTAL: usize = 7;
+    const TOTAL: usize = 9;
 
     progress("System", 1, TOTAL);
     let system = scan_system();
@@ -42,24 +42,53 @@ where
     let homebrew = scan_homebrew();
     progress("Applications", 3, TOTAL);
     let apps = scan_apps();
-    progress("/usr/local/bin", 4, TOTAL);
-    let local_bins = scan_local_bins(Path::new("/usr/local/bin"));
-    progress("PATH", 5, TOTAL);
+    progress("Persistence", 4, TOTAL);
+    let persistence = crate::hygiene::scan_persistence(&apps);
+    progress("Runtime", 5, TOTAL);
+    let runtime = crate::hygiene::scan_runtime();
+    progress("/usr/local/bin", 6, TOTAL);
+    let (local_bins, local_bin_errors) = scan_local_bins_with_errors(Path::new("/usr/local/bin"));
+    progress("PATH", 7, TOTAL);
     let path = scan_path();
-    progress("Developer tools", 6, TOTAL);
+    progress("Developer tools", 8, TOTAL);
     let dev_tools = scan_dev_tools();
 
-    progress("Findings", 7, TOTAL);
-    let findings = build_findings(&system, &homebrew, &apps, &local_bins, &path, &dev_tools);
+    progress("Findings", 9, TOTAL);
+    let mut findings = build_findings(&system, &homebrew, &apps, &local_bins, &path, &dev_tools);
+    findings.extend(crate::hygiene::detect_hygiene_findings(
+        &persistence,
+        &runtime,
+    ));
+    let correlations =
+        crate::correlation::build_correlation_graph(&apps, &persistence, &runtime, &local_bins);
+    let (findings, suppressed_findings, decision_errors) = match crate::decisions::load_decisions()
+    {
+        Ok(decisions) => {
+            let (active, suppressed) = crate::decisions::apply_decisions(findings, &decisions);
+            (active, suppressed, Vec::new())
+        }
+        Err(error) => (findings, Vec::new(), vec![error.to_string()]),
+    };
 
     Report {
+        schema_version: 3,
+        collected_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
         system,
         homebrew,
         apps,
+        persistence,
+        runtime,
+        correlations,
         local_bins,
+        local_bin_errors,
         path,
         dev_tools,
         findings,
+        suppressed_findings,
+        decision_errors,
     }
 }
 
@@ -209,18 +238,31 @@ pub fn scan_apps() -> AppsReport {
     }
 
     let mut apps = Vec::new();
+    let mut errors = Vec::new();
+    let mut root_errors = Vec::new();
 
     for root in &roots {
-        if !root.exists() {
-            continue;
+        match root.try_exists() {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(error) => {
+                let error = format!("{}: failed to inspect root: {error}", root.display());
+                root_errors.push(error.clone());
+                errors.push(error);
+                continue;
+            }
         }
 
-        for entry in WalkDir::new(root)
-            .max_depth(2)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        for entry in WalkDir::new(root).max_depth(2).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let error = format!("{}: {error}", root.display());
+                    root_errors.push(error.clone());
+                    errors.push(error);
+                    continue;
+                }
+            };
             let path = entry.path();
             if path.extension() == Some(OsStr::new("app")) && path.is_dir() {
                 apps.push(read_app(path));
@@ -241,16 +283,28 @@ pub fn scan_apps() -> AppsReport {
     }
     bundle_map.retain(|_, paths| paths.len() > 1);
 
+    errors.extend(apps.iter().filter_map(|app| app.scan_error.clone()));
     AppsReport {
         scanned_roots: roots,
         apps,
         duplicate_bundle_ids: bundle_map,
+        errors,
+        root_errors,
     }
 }
 
 pub fn read_app(path: &Path) -> AppEntry {
     let info_plist = path.join("Contents/Info.plist");
-    let plist = Value::from_file(&info_plist).ok();
+    let (plist, mut scan_error) = match Value::from_file(&info_plist) {
+        Ok(value) => (Some(value), None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "{}: failed to read metadata: {error}",
+                path.display()
+            )),
+        ),
+    };
 
     let name = plist_string(&plist, "CFBundleDisplayName")
         .or_else(|| plist_string(&plist, "CFBundleName"))
@@ -260,7 +314,16 @@ pub fn read_app(path: &Path) -> AppEntry {
         .or_else(|| plist_string(&plist, "CFBundleVersion"));
     let executable =
         plist_string(&plist, "CFBundleExecutable").map(|exe| path.join("Contents/MacOS").join(exe));
-    let executable_arch = executable.as_ref().and_then(|exe| file_arch(exe).ok());
+    let executable_arch = executable.as_ref().and_then(|exe| match file_arch(exe) {
+        Ok(arch) => Some(arch),
+        Err(error) => {
+            scan_error = Some(format!(
+                "{}: failed to inspect executable architecture: {error}",
+                path.display()
+            ));
+            None
+        }
+    });
 
     AppEntry {
         path: path.to_path_buf(),
@@ -269,19 +332,48 @@ pub fn read_app(path: &Path) -> AppEntry {
         version,
         executable,
         executable_arch,
+        scan_error,
     }
 }
 
 pub fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+    scan_local_bins_with_errors(root).0
+}
+
+fn scan_local_bins_with_errors(root: &Path) -> (Vec<BinEntry>, Vec<String>) {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), Vec::new());
+        }
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![format!("{}: failed to enumerate: {error}", root.display())],
+            );
+        }
     };
 
     let mut bins = Vec::new();
-    for entry in entries.flatten() {
+    let mut errors = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(format!("{}: failed to read entry: {error}", root.display()));
+                continue;
+            }
+        };
         let path = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                errors.push(format!(
+                    "{}: failed to read metadata: {error}",
+                    path.display()
+                ));
+                continue;
+            }
         };
 
         if metadata.is_dir() {
@@ -289,7 +381,16 @@ pub fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
         }
 
         let target = if metadata.file_type().is_symlink() {
-            fs::read_link(&path).ok()
+            match fs::read_link(&path) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    errors.push(format!(
+                        "{}: failed to read symlink: {error}",
+                        path.display()
+                    ));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -299,7 +400,16 @@ pub fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
             "file"
         }
         .to_string();
-        let arch = file_arch(&path).ok();
+        let arch = match file_arch(&path) {
+            Ok(arch) => Some(arch),
+            Err(error) => {
+                errors.push(format!(
+                    "{}: failed to inspect architecture: {error}",
+                    path.display()
+                ));
+                None
+            }
+        };
         let owner = infer_bin_owner(&path, target.as_ref());
 
         bins.push(BinEntry {
@@ -312,7 +422,7 @@ pub fn scan_local_bins(root: &Path) -> Vec<BinEntry> {
     }
 
     bins.sort_by(|a, b| a.path.cmp(&b.path));
-    bins
+    (bins, errors)
 }
 
 pub fn infer_bin_owner(path: &Path, target: Option<&PathBuf>) -> Option<String> {

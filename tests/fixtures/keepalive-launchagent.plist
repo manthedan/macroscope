@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.gateway</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/example/.nvm/versions/node/v22/bin/node</string>
+    <string>/Users/example/.nvm/versions/node/v22/lib/node_modules/example/dist/entry.js</string>
+    <string>gateway</string>
+  </array>
+</dict>
+</plist>

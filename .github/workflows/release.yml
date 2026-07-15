@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: macos-14
+    strategy:
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Verify tag matches Cargo version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Validate Agent Skill
+        run: scripts/validate-skill.py
+
+      - name: Package binary and Agent Skill
+        run: scripts/package-release.sh "${{ matrix.target }}" dist
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macroscope-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

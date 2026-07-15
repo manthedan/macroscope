@@ -27,5 +27,8 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Validate Agent Skill
+        run: scripts/validate-skill.py
+
       - name: Smoke test
         run: scripts/smoke-test.sh
