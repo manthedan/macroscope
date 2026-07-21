@@ -45,8 +45,6 @@ scripts/package-release.sh aarch64-apple-darwin
 
 ### Homebrew tap
 
-After the tap is published:
-
 ```bash
 brew tap manthedan/tap
 brew install macroscope

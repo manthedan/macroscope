@@ -2,7 +2,7 @@
 
 All notable changes to Macroscope will be documented in this file.
 
-## [0.3.0] - 2026-07-14
+## [0.3.0] - 2026-07-15
 
 ### Added
 
